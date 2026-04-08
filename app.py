@@ -281,164 +281,250 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📥 Export",
 ])
 
+# Build a fingerprint of all analysis parameters so we can skip recomputation
+# on Streamlit reruns when nothing changed.
+_analysis_params = (
+    bactrap_file.strip(), hypomap_file.strip(),
+    _gene_col_for_matching, annotation_col,
+    padj_cutoff, log2fc_cutoff, top_n_genes,
+    n_markers_per_cluster, min_cells_per_cluster,
+    umap_subsample,
+)
+
 if run_button or st.session_state.analysis_done:
 
-    # ---- Gene matching ----
-    progress = progress_placeholder.progress(0, text="Matching genes...")
+    # Reuse cached results on rerun if parameters haven't changed
+    _cached = st.session_state.get("_analysis_cache")
+    _need_recompute = run_button or _cached is None or _cached.get("params") != _analysis_params
 
-    bactrap_matched, matched_genes, gene_to_idx, matched_in_raw = match_genes(
-        bactrap_df, adata, gene_col=_gene_col_for_matching,
-    )
+    if _need_recompute:
+        # ---- Gene matching ----
+        progress = progress_placeholder.progress(0, text="Matching genes...")
 
-    if len(matched_genes) == 0:
-        progress.empty()
-        st.error("No genes could be matched between the bacTRAP data and HypoMap. "
-                 "Check that gene_name symbols in your bacTRAP file correspond to "
-                 "gene names in the HypoMap atlas.")
-        st.stop()
+        bactrap_matched, matched_genes, gene_to_idx, matched_in_raw = match_genes(
+            bactrap_df, adata, gene_col=_gene_col_for_matching,
+            _prebuilt_lookup=(_adata_lookup, _adata_gnames, _adata_has_raw),
+        )
 
-    progress.progress(10, text="Genes matched. Computing cluster means...")
+        if len(matched_genes) == 0:
+            progress.empty()
+            st.error("No genes could be matched between the bacTRAP data and HypoMap. "
+                     "Check that gene_name symbols in your bacTRAP file correspond to "
+                     "gene names in the HypoMap atlas.")
+            st.stop()
 
-    # ---- Cluster mean expression ----
-    gene_indices = [gene_to_idx[g] for g in matched_genes]
-    cluster_mean_expr = compute_cluster_mean_expression(
-        adata, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
-        indices_in_raw=matched_in_raw,
-    )
-    progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
+        progress.progress(10, text="Genes matched. Computing cluster means...")
 
-    # ---- Enriched genes ----
-    enriched_df = get_enriched_genes(bactrap_matched, padj_cutoff, log2fc_cutoff)
-    enriched_genes_list = enriched_df["_hypomap_gene_name"].tolist()
+        # ---- Cluster mean expression ----
+        gene_indices = [gene_to_idx[g] for g in matched_genes]
+        cluster_mean_expr = compute_cluster_mean_expression(
+            adata, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
+            indices_in_raw=matched_in_raw,
+        )
+        progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
 
-    # Top N enriched genes ranked by both significance and effect size
-    enriched_sorted = enriched_df.sort_values("log2FoldChange", ascending=False)
-    top_enriched_genes = enriched_sorted["_hypomap_gene_name"].tolist()[:top_n_genes]
+        # ---- Enriched genes ----
+        enriched_df = get_enriched_genes(bactrap_matched, padj_cutoff, log2fc_cutoff)
+        enriched_genes_list = enriched_df["_hypomap_gene_name"].tolist()
 
-    progress.progress(30, text="Computing enrichment correlation...")
+        # Top N enriched genes ranked by both significance and effect size
+        enriched_sorted = enriched_df.sort_values("log2FoldChange", ascending=False).reset_index(drop=True)
+        top_enriched_genes = enriched_sorted["_hypomap_gene_name"].tolist()[:top_n_genes]
 
-    # ---- Correlation analysis ----
-    corr_df = compute_enrichment_correlation(bactrap_matched, cluster_mean_expr)
-    progress.progress(30, text="Computing marker gene overlap...")
+        progress.progress(30, text="Computing enrichment correlation...")
 
-    # ---- Marker gene overlap ----
-    # Try pre-computed markers first, but only if they match the selected
-    # annotation column (pre-computed markers may be for a different level).
-    markers = load_precomputed_markers(adata)
-    if markers is not None:
-        current_clusters = set(adata.obs[annotation_col].unique().astype(str))
-        marker_clusters = set(markers.keys())
-        overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
-        if overlap_ratio < 0.5:
-            markers = None  # mismatch — recompute for the selected annotation
-    if markers is None:
-        with st.spinner("Computing marker genes (this may take several minutes)..."):
-            markers = compute_marker_genes(
-                adata, annotation_col,
-                n_genes=n_markers_per_cluster,
-                min_cells=min_cells_per_cluster,
+        # ---- Correlation analysis ----
+        corr_df = compute_enrichment_correlation(bactrap_matched, cluster_mean_expr)
+        progress.progress(30, text="Computing marker gene overlap...")
+
+        # ---- Marker gene overlap ----
+        # Try pre-computed markers first, but only if they match the selected
+        # annotation column (pre-computed markers may be for a different level).
+        markers = load_precomputed_markers(adata)
+        if markers is not None:
+            current_clusters = set(adata.obs[annotation_col].unique().astype(str))
+            marker_clusters = set(markers.keys())
+            overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
+            if overlap_ratio < 0.5:
+                markers = None  # mismatch — recompute for the selected annotation
+        if markers is None:
+            with st.spinner("Computing marker genes (this may take several minutes)..."):
+                markers = compute_marker_genes(
+                    adata, annotation_col,
+                    n_genes=n_markers_per_cluster,
+                    min_cells=min_cells_per_cluster,
+                )
+        progress.progress(45, text="Running Fisher's exact test...")
+
+        universe_size = len(matched_genes)
+        fisher_df = fisher_overlap_test(enriched_genes_list, markers, universe_size)
+        progress.progress(50, text="Computing UMAP enrichment scores...")
+
+        # ---- UMAP enrichment score ----
+        if len(top_enriched_genes) == 0:
+            st.warning(
+                f"No genes pass enrichment thresholds (padj < {padj_cutoff}, "
+                f"log₂FC > {log2fc_cutoff}). UMAP enrichment score will be zero. "
+                "Try relaxing the cutoffs."
             )
-    progress.progress(45, text="Running Fisher's exact test...")
+        enrichment_scores = compute_enrichment_score(adata, top_enriched_genes)
+        progress.progress(55, text="Preparing figures...")
 
-    universe_size = len(matched_genes)
-    fisher_df = fisher_overlap_test(enriched_genes_list, markers, universe_size)
-    progress.progress(50, text="Computing UMAP enrichment scores...")
+        # ---- Fraction expressing for dotplot ----
+        enriched_gene_indices = [gene_to_idx[g] for g in top_enriched_genes if g in gene_to_idx]
+        n_dropped = len(top_enriched_genes) - len(enriched_gene_indices)
+        if n_dropped > 0:
+            st.warning(f"{n_dropped} enriched gene(s) could not be mapped back to HypoMap indices and were excluded from the dot plot.")
+        top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
 
-    # ---- UMAP enrichment score ----
-    if len(top_enriched_genes) == 0:
-        st.warning(
-            f"No genes pass enrichment thresholds (padj < {padj_cutoff}, "
-            f"log₂FC > {log2fc_cutoff}). UMAP enrichment score will be zero. "
-            "Try relaxing the cutoffs."
+        frac_expr = compute_fraction_expressing(
+            adata, enriched_gene_indices, annotation_col,
+            min_cells=min_cells_per_cluster,
+            indices_in_raw=matched_in_raw,
         )
-    enrichment_scores = compute_enrichment_score(adata, top_enriched_genes)
-    progress.progress(55, text="Preparing figures...")
-
-    # ---- Fraction expressing for dotplot ----
-    enriched_gene_indices = [gene_to_idx[g] for g in top_enriched_genes if g in gene_to_idx]
-    n_dropped = len(top_enriched_genes) - len(enriched_gene_indices)
-    if n_dropped > 0:
-        st.warning(f"{n_dropped} enriched gene(s) could not be mapped back to HypoMap indices and were excluded from the dot plot.")
-    top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
-
-    frac_expr = compute_fraction_expressing(
-        adata, enriched_gene_indices, annotation_col,
-        min_cells=min_cells_per_cluster,
-        indices_in_raw=matched_in_raw,
-    )
-    enriched_mean_expr = compute_cluster_mean_expression(
-        adata, enriched_gene_indices, annotation_col,
-        min_cells=min_cells_per_cluster,
-        indices_in_raw=matched_in_raw,
-    )
-
-    # ---- Z-score heatmap data ----
-    top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
-    top_genes_heatmap = top_enriched_genes[:30]
-    zscore_df = compute_zscore_heatmap_data(
-        cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
-    )
-
-    progress.progress(60, text="Running NNLS deconvolution...")
-
-    # ---- NNLS deconvolution ----
-    nnls_df = compute_nnls_deconvolution(bactrap_matched, cluster_mean_expr)
-
-    progress.progress(65, text="Running GSEA enrichment...")
-
-    # ---- GSEA enrichment ----
-    try:
-        gsea_df, gsea_running_scores, gsea_ranked_genes = compute_gsea_enrichment(
-            bactrap_matched, markers, n_perm=1000,
+        enriched_mean_expr = compute_cluster_mean_expression(
+            adata, enriched_gene_indices, annotation_col,
+            min_cells=min_cells_per_cluster,
+            indices_in_raw=matched_in_raw,
         )
-    except Exception as e:
-        st.warning(f"GSEA computation failed: {e}")
-        gsea_df = pd.DataFrame()
-        gsea_running_scores = {}
-        gsea_ranked_genes = np.array([])
 
-    progress.progress(80, text="Computing AUCell scores...")
+        # ---- Z-score heatmap data ----
+        top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
+        top_genes_heatmap = top_enriched_genes[:30]
+        zscore_df = compute_zscore_heatmap_data(
+            cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
+        )
 
-    # ---- AUCell scoring ----
-    aucell_scores = compute_aucell_scores(adata, top_enriched_genes)
+        progress.progress(60, text="Running NNLS deconvolution...")
 
-    progress.progress(85, text="Computing composite ranking...")
+        # ---- NNLS deconvolution ----
+        nnls_df = compute_nnls_deconvolution(bactrap_matched, cluster_mean_expr)
 
-    # ---- Composite ranking ----
-    composite_df = compute_composite_ranking(
-        corr_df, fisher_df, nnls_df,
-        gsea_df if len(gsea_df) > 0 else None,
-    )
+        progress.progress(65, text="Running GSEA enrichment...")
 
-    progress.progress(95, text="Generating figures...")
+        # ---- GSEA enrichment ----
+        try:
+            gsea_df, gsea_running_scores, gsea_ranked_genes = compute_gsea_enrichment(
+                bactrap_matched, markers, n_perm=1000,
+            )
+        except Exception as e:
+            st.warning(f"GSEA computation failed: {e}")
+            gsea_df = pd.DataFrame()
+            gsea_running_scores = {}
+            gsea_ranked_genes = np.array([])
 
-    # ---- Subsample for UMAP ----
-    sub_indices = None
-    if adata.n_obs > umap_subsample:
-        rng = np.random.default_rng(42)
-        sub_indices = np.sort(rng.choice(adata.n_obs, size=umap_subsample, replace=False))
+        progress.progress(80, text="Computing AUCell scores...")
 
-    # Get UMAP coordinates
-    umap_key = None
-    for key in ["X_umap", "X_UMAP"]:
-        if key in adata.obsm:
-            umap_key = key
-            break
-    if umap_key is None:
-        st.error("No UMAP coordinates found in HypoMap .obsm. Expected 'X_umap'.")
-        st.stop()
+        # ---- AUCell scoring ----
+        aucell_scores = compute_aucell_scores(adata, top_enriched_genes)
 
-    umap_coords = adata.obsm[umap_key]
-    cell_labels = adata.obs[annotation_col].values.astype(str)
+        progress.progress(85, text="Computing composite ranking...")
 
-    progress.progress(100, text="Analysis complete!")
-    progress_placeholder.empty()  # clear progress bar after completion
+        # ---- Composite ranking ----
+        composite_df = compute_composite_ranking(
+            corr_df, fisher_df, nnls_df,
+            gsea_df if len(gsea_df) > 0 else None,
+        )
+
+        progress.progress(95, text="Generating figures...")
+
+        # ---- Subsample for UMAP ----
+        sub_indices = None
+        if adata.n_obs > umap_subsample:
+            rng = np.random.default_rng(42)
+            sub_indices = np.sort(rng.choice(adata.n_obs, size=umap_subsample, replace=False))
+
+        # Get UMAP coordinates
+        umap_key = None
+        for key in ["X_umap", "X_UMAP"]:
+            if key in adata.obsm:
+                umap_key = key
+                break
+        if umap_key is None:
+            st.error("No UMAP coordinates found in HypoMap .obsm. Expected 'X_umap'.")
+            st.stop()
+
+        umap_coords = adata.obsm[umap_key]
+        cell_labels = adata.obs[annotation_col].values.astype(str)
+
+        progress.progress(100, text="Analysis complete!")
+        progress_placeholder.empty()
+
+        # ---- Cache all analysis results in session state ----
+        st.session_state._analysis_cache = {
+            "params": _analysis_params,
+            "bactrap_matched": bactrap_matched,
+            "matched_genes": matched_genes,
+            "gene_to_idx": gene_to_idx,
+            "matched_in_raw": matched_in_raw,
+            "gene_indices": gene_indices,
+            "cluster_mean_expr": cluster_mean_expr,
+            "enriched_df": enriched_df,
+            "enriched_genes_list": enriched_genes_list,
+            "top_enriched_genes": top_enriched_genes,
+            "corr_df": corr_df,
+            "markers": markers,
+            "fisher_df": fisher_df,
+            "enrichment_scores": enrichment_scores,
+            "enriched_gene_indices": enriched_gene_indices,
+            "top_clusters_corr": top_clusters_corr,
+            "frac_expr": frac_expr,
+            "enriched_mean_expr": enriched_mean_expr,
+            "zscore_df": zscore_df,
+            "nnls_df": nnls_df,
+            "gsea_df": gsea_df,
+            "gsea_running_scores": gsea_running_scores,
+            "gsea_ranked_genes": gsea_ranked_genes,
+            "aucell_scores": aucell_scores,
+            "composite_df": composite_df,
+            "sub_indices": sub_indices,
+            "umap_coords": umap_coords,
+            "cell_labels": cell_labels,
+            "enriched_sorted": enriched_sorted,
+            "top_genes_heatmap": top_genes_heatmap,
+            "top_clusters_heatmap": top_clusters_heatmap,
+        }
+    else:
+        # ---- Restore cached results (no recomputation needed) ----
+        _c = _cached
+        bactrap_matched = _c["bactrap_matched"]
+        matched_genes = _c["matched_genes"]
+        gene_to_idx = _c["gene_to_idx"]
+        matched_in_raw = _c["matched_in_raw"]
+        gene_indices = _c["gene_indices"]
+        cluster_mean_expr = _c["cluster_mean_expr"]
+        enriched_df = _c["enriched_df"]
+        enriched_genes_list = _c["enriched_genes_list"]
+        top_enriched_genes = _c["top_enriched_genes"]
+        corr_df = _c["corr_df"]
+        markers = _c["markers"]
+        fisher_df = _c["fisher_df"]
+        enrichment_scores = _c["enrichment_scores"]
+        enriched_gene_indices = _c["enriched_gene_indices"]
+        top_clusters_corr = _c["top_clusters_corr"]
+        frac_expr = _c["frac_expr"]
+        enriched_mean_expr = _c["enriched_mean_expr"]
+        zscore_df = _c["zscore_df"]
+        nnls_df = _c["nnls_df"]
+        gsea_df = _c["gsea_df"]
+        gsea_running_scores = _c["gsea_running_scores"]
+        gsea_ranked_genes = _c["gsea_ranked_genes"]
+        aucell_scores = _c["aucell_scores"]
+        composite_df = _c["composite_df"]
+        sub_indices = _c["sub_indices"]
+        umap_coords = _c["umap_coords"]
+        cell_labels = _c["cell_labels"]
+        enriched_sorted = _c["enriched_sorted"]
+        top_genes_heatmap = _c["top_genes_heatmap"]
+        top_clusters_heatmap = _c["top_clusters_heatmap"]
+        progress_placeholder.empty()
+
     st.session_state.analysis_done = True
 
     # Cache figure bytes so the Export tab doesn't regenerate them.
-    # Only reset when a new analysis run is triggered (run_button pressed),
-    # not on every Streamlit rerun.
-    if run_button:
+    # Only reset when a new analysis run is triggered (run_button pressed
+    # or parameters changed), not on every Streamlit rerun.
+    if _need_recompute:
         st.session_state.fig_bytes = {}
 
     if "fig_bytes" not in st.session_state:

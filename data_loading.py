@@ -195,6 +195,7 @@ def _detect_gene_column(bactrap_df: pd.DataFrame) -> str:
     return first_col
 
 
+@st.cache_resource(show_spinner=False)
 def _build_adata_gene_lookup(
     adata: ad.AnnData, use_raw: bool = True,
 ) -> Tuple[Dict[str, Tuple[str, int]], np.ndarray, bool]:
@@ -267,6 +268,7 @@ def match_genes(
     bactrap_df: pd.DataFrame,
     adata: ad.AnnData,
     gene_col: Optional[str] = None,
+    _prebuilt_lookup: Optional[Tuple[Dict[str, Tuple[str, int]], np.ndarray, bool]] = None,
 ) -> Tuple[pd.DataFrame, List[str], Dict[str, int], bool]:
     """
     Match bacTRAP gene identifiers to HypoMap genes.
@@ -278,6 +280,10 @@ def match_genes(
     that *all* genes are available for matching (not just the highly-variable
     subset stored in ``adata.var``).
 
+    Parameters:
+        _prebuilt_lookup: Optional pre-built lookup tuple from
+            ``_build_adata_gene_lookup`` to avoid redundant recomputation.
+
     Returns:
         bactrap_matched: subset of bactrap_df with matched genes
         matched_gene_names: list of matched gene symbols (as they appear in HypoMap)
@@ -288,8 +294,11 @@ def match_genes(
     """
     logger.info("match_genes called with gene_col=%s", gene_col)
 
-    # Build the comprehensive HypoMap gene lookup once
-    adata_gene_lookup, adata_gene_names, has_raw = _build_adata_gene_lookup(adata)
+    # Use pre-built lookup if provided, otherwise build it (cached)
+    if _prebuilt_lookup is not None:
+        adata_gene_lookup, adata_gene_names, has_raw = _prebuilt_lookup
+    else:
+        adata_gene_lookup, adata_gene_names, has_raw = _build_adata_gene_lookup(adata)
 
     # Determine which bacTRAP column to use for gene matching
     if gene_col is None:
