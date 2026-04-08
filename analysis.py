@@ -52,13 +52,19 @@ def compute_enrichment_correlation(
             "n_genes",
         ])
 
-    # Build aligned enrichment vector
-    bt_lookup = dict(zip(
-        bactrap_matched["_hypomap_gene_name"],
-        bactrap_matched[enrichment_col],
-    ))
+    # Build aligned enrichment vector (deduplicate bacTRAP genes — keep first)
+    bt_dedup = bactrap_matched.drop_duplicates(subset="_hypomap_gene_name", keep="first")
+    bt_lookup = dict(zip(bt_dedup["_hypomap_gene_name"], bt_dedup[enrichment_col]))
     enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
+
+    # Guard against duplicate index in cluster_mean_expr
     expr_sub = cluster_mean_expr.loc[common]
+    if expr_sub.index.duplicated().any():
+        expr_sub = expr_sub.groupby(expr_sub.index).mean()
+        # Re-align after dedup
+        common = np.intersect1d(list(bt_lookup.keys()), expr_sub.index.values)
+        enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
+        expr_sub = expr_sub.loc[common]
 
     # Remove genes with NaN enrichment values (e.g. NaN log2FoldChange)
     valid_mask = np.isfinite(enrichment)
@@ -415,17 +421,15 @@ def compute_nnls_deconvolution(
         DataFrame with columns: cluster, weight, weight_norm (0–1 scaled),
         sorted by weight descending.
     """
-    bt_genes = bactrap_matched["_hypomap_gene_name"].values
+    bt_dedup = bactrap_matched.drop_duplicates(subset="_hypomap_gene_name", keep="first")
+    bt_genes = bt_dedup["_hypomap_gene_name"].values
     expr_genes = cluster_mean_expr.index.values
     common = np.intersect1d(bt_genes, expr_genes)
 
     if len(common) < 5:
         return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
 
-    bt_lookup = dict(zip(
-        bactrap_matched["_hypomap_gene_name"],
-        bactrap_matched[enrichment_col],
-    ))
+    bt_lookup = dict(zip(bt_dedup["_hypomap_gene_name"], bt_dedup[enrichment_col]))
     enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
     valid = np.isfinite(enrichment)
     enrichment = enrichment[valid]
@@ -434,7 +438,13 @@ def compute_nnls_deconvolution(
     if len(enrichment) < 5:
         return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
 
-    A = cluster_mean_expr.loc[common].values.astype(float)  # (genes, clusters)
+    expr_sub = cluster_mean_expr.loc[common]
+    if expr_sub.index.duplicated().any():
+        expr_sub = expr_sub.groupby(expr_sub.index).mean()
+        common = np.intersect1d(common, expr_sub.index.values)
+        enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
+        expr_sub = expr_sub.loc[common]
+    A = expr_sub.values.astype(float)  # (genes, clusters)
     b = enrichment.astype(float)
 
     # Shift b so it's non-negative (NNLS requires non-negative target

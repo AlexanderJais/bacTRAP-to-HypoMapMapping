@@ -344,6 +344,17 @@ def match_genes(
     bactrap_matched = bactrap_matched.reset_index(drop=True)
     bactrap_matched["_hypomap_gene_name"] = matched_gene_names
 
+    # Deduplicate: keep first occurrence when multiple bacTRAP rows map to
+    # the same HypoMap gene (e.g. multiple Ensembl IDs → same symbol).
+    n_before = len(bactrap_matched)
+    bactrap_matched = bactrap_matched.drop_duplicates(subset="_hypomap_gene_name", keep="first")
+    bactrap_matched = bactrap_matched.reset_index(drop=True)
+    matched_gene_names = bactrap_matched["_hypomap_gene_name"].tolist()
+    gene_to_adata_idx = {g: gene_to_adata_idx[g] for g in matched_gene_names}
+    if n_before != len(bactrap_matched):
+        logger.info("  deduplicated %d → %d genes (removed %d duplicate HypoMap mappings)",
+                     n_before, len(bactrap_matched), n_before - len(bactrap_matched))
+
     return bactrap_matched, matched_gene_names, gene_to_adata_idx, has_raw
 
 
@@ -576,7 +587,13 @@ def compute_cluster_mean_expression(
     gene_names = _resolve_gene_names(
         adata, gene_indices_arr[survived_mask], from_raw=indices_in_raw,
     )
-    return pd.DataFrame(result, index=gene_names)
+    df = pd.DataFrame(result, index=gene_names)
+    # Deduplicate: multiple indices can resolve to the same gene symbol
+    if df.index.duplicated().any():
+        logger.info("compute_cluster_mean_expression: dropping %d duplicate gene names",
+                     df.index.duplicated().sum())
+        df = df.groupby(df.index).mean()
+    return df
 
 
 def compute_fraction_expressing(
@@ -611,6 +628,9 @@ def compute_fraction_expressing(
     gene_names = _resolve_gene_names(
         adata, gene_indices_arr[survived_mask], from_raw=indices_in_raw,
     )
-    return pd.DataFrame(result, index=gene_names)
+    df = pd.DataFrame(result, index=gene_names)
+    if df.index.duplicated().any():
+        df = df.groupby(df.index).mean()
+    return df
 
 
