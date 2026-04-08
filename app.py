@@ -176,6 +176,7 @@ from analysis import (
 )
 from figures import (
     setup_nature_style,
+    figure_bactrap_volcano,
     figure_correlation_barplot,
     figure_umap_enrichment,
     figure_dotplot,
@@ -270,7 +271,7 @@ _gene_col_for_matching = "_index" if gene_col_selection == "(use row index)" els
 # Progress bar placeholder — rendered above tabs so it's always visible
 progress_placeholder = st.empty()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 Data Overview",
     "📈 Correlation",
     "🗺️ UMAP Projection",
@@ -278,7 +279,6 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "🔥 Heatmap",
     "⚖️ NNLS Deconvolution",
     "📶 GSEA",
-    "🎯 Composite Ranking",
     "📥 Export",
 ])
 
@@ -521,6 +521,34 @@ if run_button or st.session_state.analysis_done:
         else:
             st.warning("No genes pass the current enrichment thresholds.")
 
+        st.subheader("Figure: bacTRAP Volcano Plot")
+        fig_volcano = figure_bactrap_volcano(
+            bactrap_matched,
+            highlight_genes=["Pnoc"],
+            padj_cutoff=padj_cutoff,
+            log2fc_cutoff=log2fc_cutoff,
+            double_column=double_column,
+        )
+        st.pyplot(fig_volcano)
+        _cache_fig("fig_volcano_bactrap", fig_volcano)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_volcano_bactrap"]["pdf"],
+                "fig_volcano_bactrap.pdf", "application/pdf",
+                key="dl_fig_volcano_bt_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_volcano_bactrap"]["svg"],
+                "fig_volcano_bactrap.svg", "image/svg+xml",
+                key="dl_fig_volcano_bt_svg",
+            )
+        plt.close(fig_volcano)
+
     # ======================================================================
     # TAB 2: Correlation Analysis
     # ======================================================================
@@ -664,13 +692,13 @@ if run_button or st.session_state.analysis_done:
                 )
             plt.close(fig_d)
 
-            # Dotplot
-            st.subheader("Figure C: Marker Overlap Dot Plot")
-            top_fisher_clusters = fisher_df["cluster"].tolist()[:10]
+            # Dotplot — use correlation-ranked clusters for biological relevance
+            st.subheader("Figure C: Enriched Gene Dot Plot")
+            dotplot_clusters = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
             dotplot_genes = top_enriched_genes[:20]
             fig_c = figure_dotplot(
                 enriched_mean_expr, frac_expr,
-                dotplot_genes, top_fisher_clusters,
+                dotplot_genes, dotplot_clusters,
                 double_column=True,
             )
             st.pyplot(fig_c)
@@ -907,66 +935,9 @@ if run_button or st.session_state.analysis_done:
         plt.close(fig_i)
 
     # ======================================================================
-    # TAB 8: Composite Ranking
+    # TAB 8: Export
     # ======================================================================
     with tab8:
-        st.header("Composite Consensus Ranking")
-        st.markdown(
-            "Combines all methods (Correlation, Fisher's, NNLS, GSEA) into a "
-            "single consensus ranking by averaging percentile scores. This "
-            "produces a robust ranking that doesn't depend on any single method."
-        )
-
-        if len(composite_df) > 0:
-            st.subheader("Top Clusters (Consensus)")
-            display_cols = ["cluster", "composite_score"]
-            for c in composite_df.columns:
-                if c.endswith("_pctl"):
-                    display_cols.append(c)
-            st.dataframe(
-                composite_df[display_cols].head(30).style.format(
-                    {c: "{:.3f}" for c in display_cols if c != "cluster"}
-                ),
-                use_container_width=True,
-            )
-
-            st.subheader("Figure J: Multi-Method Comparison")
-            fig_j = figure_composite_ranking(
-                composite_df, top_n=20, double_column=True,
-            )
-            st.pyplot(fig_j)
-            _cache_fig("fig_j_composite", fig_j)
-
-            col_pdf, col_svg = st.columns(2)
-            with col_pdf:
-                st.download_button(
-                    "Download PDF",
-                    st.session_state.fig_bytes["fig_j_composite"]["pdf"],
-                    "fig_j_composite.pdf", "application/pdf",
-                    key="dl_fig_j_pdf",
-                )
-            with col_svg:
-                st.download_button(
-                    "Download SVG",
-                    st.session_state.fig_bytes["fig_j_composite"]["svg"],
-                    "fig_j_composite.svg", "image/svg+xml",
-                    key="dl_fig_j_svg",
-                )
-            plt.close(fig_j)
-
-            st.download_button(
-                "Download composite ranking (CSV)",
-                composite_df.to_csv(index=False).encode(),
-                "composite_ranking.csv", "text/csv",
-                key="dl_composite_csv",
-            )
-        else:
-            st.warning("No composite ranking data available.")
-
-    # ======================================================================
-    # TAB 9: Export
-    # ======================================================================
-    with tab9:
         st.header("Export All Results")
 
         st.subheader("Figures")

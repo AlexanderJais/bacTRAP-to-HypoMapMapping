@@ -177,9 +177,10 @@ def figure_umap_enrichment(
     """
     setup_nature_style()
     width = get_figure_width(double_column=True)  # always double for two panels
-    height = width * 0.45
+    height = width * 0.5
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(width, height))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(width, height),
+                                    gridspec_kw={"wspace": 0.8})
 
     if subsample_idx is not None:
         umap_coords = umap_coords[subsample_idx]
@@ -230,17 +231,17 @@ def figure_umap_enrichment(
     for spine in ax1.spines.values():
         spine.set_visible(False)
 
-    # Legend outside
+    # Legend below the left panel — avoids overlapping with right panel
     handles = [
         plt.Line2D([0], [0], marker="o", color="w",
                     markerfacecolor=color_map[l], markersize=3, label=l)
         for l in unique_plot
     ]
-    ncol = max(1, -(-len(unique_plot) // 15))  # ceiling division by 15
+    ncol = max(2, -(-len(unique_plot) // 10))  # spread across columns
     ax1.legend(
-        handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5),
-        fontsize=4, frameon=False, ncol=ncol,
-        handletextpad=0.2, columnspacing=0.5,
+        handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.05),
+        fontsize=3.5, frameon=False, ncol=ncol,
+        handletextpad=0.1, columnspacing=0.3, labelspacing=0.2,
     )
 
     # --- Right panel: enrichment score ---
@@ -441,6 +442,118 @@ def figure_volcano_enrichment(
     ax.set_ylabel(r"$-\log_{10}$(p-value)")
     ax.set_title("Marker gene overlap enrichment (Fisher's exact test)")
 
+    ax.legend(fontsize=5, frameon=False, loc="upper left")
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure A (new): bacTRAP Gene Volcano Plot
+# ---------------------------------------------------------------------------
+
+def figure_bactrap_volcano(
+    bactrap_matched: pd.DataFrame,
+    highlight_genes: Optional[List[str]] = None,
+    padj_cutoff: float = 0.05,
+    log2fc_cutoff: float = 1.0,
+    top_n_labels: int = 15,
+    double_column: bool = False,
+) -> plt.Figure:
+    """
+    Classic volcano plot of bacTRAP DESeq2 results.
+    x = log2FoldChange, y = -log10(padj).
+    Highlights significantly enriched genes and optionally labels specific genes.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+    height = width * 0.8
+
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    if len(bactrap_matched) == 0:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
+    df = bactrap_matched.copy()
+    df = df.dropna(subset=["log2FoldChange", "padj"])
+    df["neg_log10_padj"] = -np.log10(df["padj"].clip(lower=1e-300))
+    df["neg_log10_padj"] = df["neg_log10_padj"].clip(upper=50)
+
+    # Classify points
+    sig_up = (df["padj"] < padj_cutoff) & (df["log2FoldChange"] > log2fc_cutoff)
+    sig_down = (df["padj"] < padj_cutoff) & (df["log2FoldChange"] < -log2fc_cutoff)
+    nonsig = ~sig_up & ~sig_down
+
+    # Plot non-significant
+    ax.scatter(
+        df.loc[nonsig, "log2FoldChange"], df.loc[nonsig, "neg_log10_padj"],
+        c="#bbbbbb", s=8, alpha=0.4, edgecolors="none", zorder=1,
+    )
+    # Plot significant down
+    ax.scatter(
+        df.loc[sig_down, "log2FoldChange"], df.loc[sig_down, "neg_log10_padj"],
+        c="#4575b4", s=12, alpha=0.7, edgecolors="none", zorder=2,
+        label="Down-regulated",
+    )
+    # Plot significant up (enriched in IP)
+    ax.scatter(
+        df.loc[sig_up, "log2FoldChange"], df.loc[sig_up, "neg_log10_padj"],
+        c="#d62728", s=12, alpha=0.7, edgecolors="none", zorder=2,
+        label="Enriched in IP",
+    )
+
+    # Threshold lines
+    thresh_y = -np.log10(padj_cutoff)
+    ax.axhline(y=thresh_y, color="black", linestyle="--", linewidth=0.4, alpha=0.4)
+    ax.axvline(x=log2fc_cutoff, color="black", linestyle="--", linewidth=0.4, alpha=0.4)
+    ax.axvline(x=-log2fc_cutoff, color="black", linestyle="--", linewidth=0.4, alpha=0.4)
+
+    # Label highlight genes (e.g. Pnoc) — always label these regardless of significance
+    if highlight_genes is None:
+        highlight_genes = []
+    highlight_set = set(g.lower() for g in highlight_genes)
+
+    # Auto-label top enriched genes + forced highlights
+    top_up = df[sig_up].nlargest(top_n_labels, "neg_log10_padj")
+    genes_to_label = set(top_up["_hypomap_gene_name"].tolist())
+
+    # Add highlight genes
+    for _, row in df.iterrows():
+        gname = str(row.get("_hypomap_gene_name", ""))
+        if gname.lower() in highlight_set:
+            genes_to_label.add(gname)
+
+    texts = []
+    for _, row in df.iterrows():
+        gname = str(row.get("_hypomap_gene_name", ""))
+        if gname in genes_to_label:
+            is_highlight = gname.lower() in highlight_set
+            texts.append(
+                ax.text(
+                    row["log2FoldChange"], row["neg_log10_padj"],
+                    gname, fontsize=5 if is_highlight else 4.5,
+                    fontweight="bold" if is_highlight else "normal",
+                    color="#d62728" if is_highlight else "black",
+                )
+            )
+            # Mark highlight genes with a ring
+            if is_highlight:
+                ax.scatter(
+                    [row["log2FoldChange"]], [row["neg_log10_padj"]],
+                    s=50, facecolors="none", edgecolors="#d62728",
+                    linewidths=1.0, zorder=5,
+                )
+
+    if len(texts) > 0:
+        adjust_text(
+            texts, ax=ax,
+            arrowprops=dict(arrowstyle="-", color="gray", lw=0.3),
+        )
+
+    ax.set_xlabel(r"$\log_2$(Fold Change)")
+    ax.set_ylabel(r"$-\log_{10}$(adjusted p-value)")
+    ax.set_title("bacTRAP translational profiling (PoA IP vs Input)")
     ax.legend(fontsize=5, frameon=False, loc="upper left")
 
     return fig

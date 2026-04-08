@@ -14,7 +14,7 @@ The HypoMap single-cell RNA-seq atlas of the murine hypothalamus (Steuernagel et
 
 ## Gene matching
 
-Gene symbols from the bacTRAP dataset were matched to the HypoMap atlas using case-insensitive string matching. When the atlas used Ensembl gene identifiers as primary variable names, gene symbols were retrieved from the `gene_name` column of the variable metadata. When the atlas raw layer contained a different number of genes than the filtered variable set (common after highly variable gene selection), gene indices were remapped from filtered to raw space via name-based lookup to ensure correct expression values were retrieved.
+Gene identifiers from the bacTRAP dataset were matched to the HypoMap atlas using a comprehensive bidirectional lookup. The atlas raw layer (containing all 51,216 genes prior to feature selection) was used as the primary matching target. When atlas variable names were Ensembl identifiers (ENSMUSG), gene symbols were resolved from the `feature_name` column of the variable metadata. Both gene symbols and Ensembl IDs were indexed in the lookup dictionary, enabling matching regardless of whether the bacTRAP data uses symbols or Ensembl identifiers. The bacTRAP gene column was auto-detected by testing all candidate columns against the atlas lookup and selecting the column yielding the highest match rate. Duplicate mappings (multiple Ensembl IDs resolving to the same gene symbol) were resolved by retaining the first occurrence. This procedure achieved a 94.8% match rate (26,426 of 27,884 bacTRAP genes).
 
 ## Enrichment correlation analysis
 
@@ -51,6 +51,22 @@ All figures were generated using matplotlib (v3.7+) following Nature journal spe
 ## Software
 
 All analyses were implemented in Python 3.10+ using a custom Streamlit application. Key dependencies: scanpy 1.9.6+ (Wolf et al., 2018), anndata 0.10+, scipy 1.11+ (Virtanen et al., 2020), pandas 2.0+, numpy 1.24+, matplotlib 3.7+ (Hunter, 2007), statsmodels 0.14+, and adjustText 0.8+. The HypoMap atlas was handled in sparse matrix format throughout to accommodate its size (~3.9 GB). Expression submatrices were extracted in chunks of 200 genes to limit peak memory usage. The application source code is available at [repository URL].
+
+---
+
+## Figure Legends
+
+**Figure 1. bacTRAP translational profiling identifies enriched transcripts in preoptic area neurons.**
+**(a)** Volcano plot of bacTRAP DESeq2 results showing log2 fold change (IP vs Input) against statistical significance (-log10 adjusted p-value) for all 26,426 matched genes. Red dots indicate significantly enriched genes (padj < 0.05, log2FC > 1); blue dots indicate significantly depleted genes. Pnoc (prepronociceptin) is highlighted. Dashed lines indicate significance thresholds.
+**(b)** UMAP projection of the HypoMap hypothalamic single-cell atlas (384,925 cells). Left panel: cell-type annotation at the C286 resolution level. Right panel: bacTRAP enrichment score computed as the z-scored mean expression of the top 50 enriched genes, projected onto each cell. Enrichment score color scale indicates relative enrichment (magma colormap).
+**(c)** Dot plot of the top bacTRAP-enriched genes across the highest-correlating HypoMap clusters. Dot size represents the fraction of cells expressing each gene (>0 threshold); color intensity represents mean expression level (viridis colormap). Clusters are ranked by Spearman correlation with the bacTRAP enrichment profile.
+**(d)** Preranked GSEA running enrichment score curves for the top 5 HypoMap clusters. All matched genes were ranked by bacTRAP log2 fold change (descending); running scores show the cumulative enrichment of each cluster's marker gene set along the ranked list. Normalized enrichment scores (NES) are indicated in the legend. Significance was assessed by permutation testing (1,000 permutations) with Benjamini-Hochberg correction.
+
+**Extended Data Figures:**
+**(e)** Z-scored heatmap of mean expression for the top 30 enriched genes across the 20 highest-correlating clusters. Row-wise z-scoring highlights cluster-specific expression patterns. Rows are ordered by hierarchical clustering.
+**(f)** NNLS deconvolution weights representing the fractional contribution of each HypoMap cluster to the bacTRAP enrichment profile. Only clusters with non-zero weights are shown.
+**(g)** AUCell scores projected onto the HypoMap UMAP embedding. AUCell quantifies per-cell enrichment of the bacTRAP gene set using a rank-based area-under-the-curve approach within the top 5% of expressed genes per cell.
+**(h)** Horizontal barplot of GSEA normalized enrichment scores (NES) for the top 20 clusters. Red bars indicate clusters with significant enrichment (padj < 0.05); grey bars indicate non-significant clusters.
 
 ---
 
