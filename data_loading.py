@@ -19,7 +19,13 @@ def load_hypomap(file_path: str) -> ad.AnnData:
     if not sparse.issparse(adata.X):
         adata.X = sparse.csr_matrix(adata.X)
     if adata.raw is not None and not sparse.issparse(adata.raw.X):
-        adata.raw._X = sparse.csr_matrix(adata.raw.X)
+        # Rebuild raw layer with sparse matrix via the public API
+        import anndata
+        raw_adata = anndata.AnnData(
+            X=sparse.csr_matrix(adata.raw.X),
+            var=adata.raw.var,
+        )
+        adata.raw = raw_adata
     return adata
 
 
@@ -133,6 +139,9 @@ def _extract_gene_submatrix(
 
     n_cells = X.shape[0]
     n_genes = len(gene_indices)
+
+    if n_genes == 0:
+        return np.empty((n_cells, 0), dtype=np.float32)
 
     # For small gene sets, direct column slicing is fine
     if n_genes <= 500:

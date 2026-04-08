@@ -248,6 +248,12 @@ if run_button or st.session_state.analysis_done:
     progress.progress(75, text="Computing UMAP enrichment scores...")
 
     # ---- UMAP enrichment score ----
+    if len(top_enriched_genes) == 0:
+        st.warning(
+            f"No genes pass enrichment thresholds (padj < {padj_cutoff}, "
+            f"log₂FC > {log2fc_cutoff}). UMAP enrichment score will be zero. "
+            "Try relaxing the cutoffs."
+        )
     enrichment_scores = compute_enrichment_score(adata, top_enriched_genes)
     progress.progress(85, text="Preparing figures...")
 
@@ -298,9 +304,14 @@ if run_button or st.session_state.analysis_done:
     progress.progress(100, text="Analysis complete!")
     st.session_state.analysis_done = True
 
-    # Pre-generate and cache all figure bytes so the Export tab doesn't
-    # have to regenerate them (the figures get plt.close()'d after display).
-    st.session_state.fig_bytes = {}
+    # Cache figure bytes so the Export tab doesn't regenerate them.
+    # Only reset when a new analysis run is triggered (run_button pressed),
+    # not on every Streamlit rerun.
+    if run_button:
+        st.session_state.fig_bytes = {}
+
+    if "fig_bytes" not in st.session_state:
+        st.session_state.fig_bytes = {}
 
     def _cache_fig(name, fig):
         st.session_state.fig_bytes[name] = {
@@ -331,7 +342,7 @@ if run_button or st.session_state.analysis_done:
         with col5:
             st.metric("Enriched genes (padj + FC)", len(enriched_df))
         with col6:
-            match_pct = len(matched_genes) / len(bactrap_df) * 100
+            match_pct = (len(matched_genes) / len(bactrap_df) * 100) if len(bactrap_df) > 0 else 0.0
             st.metric("Match rate", f"{match_pct:.1f}%")
 
         st.subheader("Gene Matching Summary")

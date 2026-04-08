@@ -42,9 +42,10 @@ def compute_enrichment_correlation(
     expr_genes = cluster_mean_expr.index.values
     common = np.intersect1d(bt_genes, expr_genes)
 
-    if len(common) == 0:
+    if len(common) < 3:
         return pd.DataFrame(columns=[
-            "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval"
+            "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
+            "n_genes",
         ])
 
     # Build aligned enrichment vector
@@ -129,8 +130,16 @@ def compute_marker_genes(
     # Ensure the data is log-normalized for rank_genes_groups
     sc.pp.filter_genes(adata_work, min_cells=1)
 
-    # Check if data might need normalization
-    if adata_work.X.max() > 50:
+    # Check if data needs normalization by sampling a small subset to
+    # avoid the cost of computing max() on the full sparse matrix.
+    sample_size = min(1000, adata_work.n_obs)
+    sample_idx = np.random.choice(adata_work.n_obs, sample_size, replace=False)
+    X_sample = adata_work.X[sample_idx, :]
+    if sparse.issparse(X_sample):
+        sample_max = X_sample.max()
+    else:
+        sample_max = np.max(X_sample)
+    if sample_max > 50:
         sc.pp.normalize_total(adata_work, target_sum=1e4)
         sc.pp.log1p(adata_work)
 
@@ -279,34 +288,27 @@ def compute_enrichment_score(
     if len(score_gene_list) == 0:
         return np.zeros(adata.n_obs)
 
-    # Use sc.tl.score_genes
-    adata_copy = adata.copy()
-    try:
-        sc.tl.score_genes(
-            adata_copy,
-            gene_list=score_gene_list,
-            score_name=score_name,
-            use_raw=use_raw,
-        )
-        scores = adata_copy.obs[score_name].values.copy()
-    except Exception:
-        # Fallback: manual z-scored mean
-        gene_idx = [var_names_list.index(g) for g in score_gene_list if g in var_names_list]
-        if len(gene_idx) == 0:
-            return np.zeros(adata.n_obs)
-        X = adata.raw.X if (use_raw and adata.raw is not None) else adata.X
-        X_sub = X[:, gene_idx]
-        if sparse.issparse(X_sub):
-            X_sub = np.asarray(X_sub.toarray())
-        else:
-            X_sub = np.asarray(X_sub)
-        scores = X_sub.mean(axis=1).flatten()
-        # Z-score
-        std = np.std(scores)
-        if std > 0:
-            scores = (scores - np.mean(scores)) / std
-    finally:
-        del adata_copy
+    # Manual z-scored mean — avoids adata.copy() which doubles memory for
+    # the full atlas. sc.tl.score_genes requires a copy and uses more RAM
+    # than we can afford with a ~3.9GB object.
+    var_name_set = set(var_names_list)
+    gene_idx = [var_names_list.index(g) for g in score_gene_list if g in var_name_set]
+    if len(gene_idx) == 0:
+        return np.zeros(adata.n_obs)
+
+    X = adata.raw.X if (use_raw and adata.raw is not None) else adata.X
+    X_sub = X[:, gene_idx]
+    if sparse.issparse(X_sub):
+        X_sub = np.asarray(X_sub.toarray())
+    else:
+        X_sub = np.asarray(X_sub)
+
+    scores = X_sub.mean(axis=1).flatten()
+
+    # Z-score
+    std = np.std(scores)
+    if std > 0:
+        scores = (scores - np.mean(scores)) / std
 
     return scores
 

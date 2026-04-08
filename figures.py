@@ -99,6 +99,13 @@ def figure_correlation_barplot(
     width = get_figure_width(double_column)
 
     df = corr_df.head(top_n).copy()
+
+    if len(df) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
     df = df.iloc[::-1]  # reverse for bottom-to-top plotting
 
     n_bars = len(df)
@@ -188,22 +195,24 @@ def figure_umap_enrichment(
     unique_labels = np.unique(cell_labels)
     n_labels = len(unique_labels)
 
+    other_label = None
     if n_labels > max_legend_items:
-        # Keep top N by frequency, rest as "Other"
+        # Keep top N by frequency, rest grouped as a catch-all
         from collections import Counter
         counts = Counter(cell_labels)
         top_labels = [label for label, _ in counts.most_common(max_legend_items)]
         top_set = set(top_labels)
-        plot_labels = np.array([l if l in top_set else "Other" for l in cell_labels])
-        unique_plot = sorted(set(plot_labels) - {"Other"}) + ["Other"]
+        other_label = "Other (grouped)"
+        plot_labels = np.array([l if l in top_set else other_label for l in cell_labels])
+        unique_plot = sorted(set(plot_labels) - {other_label}) + [other_label]
     else:
         plot_labels = cell_labels
         unique_plot = sorted(unique_labels)
 
     palette = get_qualitative_palette(len(unique_plot))
     color_map = dict(zip(unique_plot, palette))
-    if "Other" in color_map:
-        color_map["Other"] = "#d3d3d3"
+    if other_label is not None and other_label in color_map:
+        color_map[other_label] = "#d3d3d3"
     point_colors = [color_map[l] for l in plot_labels]
 
     ax1.scatter(
@@ -225,9 +234,10 @@ def figure_umap_enrichment(
                     markerfacecolor=color_map[l], markersize=3, label=l)
         for l in unique_plot
     ]
+    ncol = max(1, -(-len(unique_plot) // 15))  # ceiling division by 15
     ax1.legend(
         handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5),
-        fontsize=4, frameon=False, ncol=max(1, len(unique_plot) // 25 + 1),
+        fontsize=4, frameon=False, ncol=ncol,
         handletextpad=0.2, columnspacing=0.5,
     )
 
@@ -296,16 +306,22 @@ def figure_dotplot(
     max_dot_size = 80
     min_dot_size = 5
 
-    for i, gene in enumerate(genes):
-        for j, cluster in enumerate(clusters):
-            frac = frac_sub.loc[gene, cluster]
-            mean_val = mean_sub.loc[gene, cluster]
-            size = min_dot_size + frac * (max_dot_size - min_dot_size)
-            ax.scatter(
-                j, i, s=size, c=[mean_val], cmap="viridis",
-                vmin=mean_sub.values.min(), vmax=mean_sub.values.max(),
-                edgecolors="black", linewidths=0.3, zorder=3,
-            )
+    # Vectorized: build coordinate/size/color arrays for a single scatter call
+    col_idx, row_idx = np.meshgrid(np.arange(n_clusters), np.arange(n_genes))
+    x_flat = col_idx.ravel().astype(float)
+    y_flat = row_idx.ravel().astype(float)
+    frac_flat = frac_sub.values.ravel()
+    mean_flat = mean_sub.values.ravel()
+    sizes = min_dot_size + frac_flat * (max_dot_size - min_dot_size)
+
+    vmin = np.nanmin(mean_flat) if np.any(np.isfinite(mean_flat)) else 0
+    vmax = np.nanmax(mean_flat) if np.any(np.isfinite(mean_flat)) else 1
+
+    ax.scatter(
+        x_flat, y_flat, s=sizes, c=mean_flat, cmap="viridis",
+        vmin=vmin, vmax=vmax,
+        edgecolors="black", linewidths=0.3, zorder=3,
+    )
 
     ax.set_xticks(range(n_clusters))
     ax.set_xticklabels(clusters, rotation=45, ha="right", fontsize=5)
@@ -326,7 +342,7 @@ def figure_dotplot(
     # Colorbar for mean expression
     sm = cm.ScalarMappable(
         cmap="viridis",
-        norm=Normalize(vmin=mean_sub.values.min(), vmax=mean_sub.values.max()),
+        norm=Normalize(vmin=vmin, vmax=vmax),
     )
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, shrink=0.5, aspect=15, pad=0.02)
@@ -414,8 +430,8 @@ def figure_volcano_enrichment(
             arrowprops=dict(arrowstyle="-", color="gray", lw=0.3),
         )
 
-    ax.set_xlabel("log₂(odds ratio)")
-    ax.set_ylabel("−log₁₀(p-value)")
+    ax.set_xlabel(r"$\log_2$(odds ratio)")
+    ax.set_ylabel(r"$-\log_{10}$(p-value)")
     ax.set_title("Marker gene overlap enrichment (Fisher's exact test)")
 
     ax.legend(fontsize=5, frameon=False, loc="upper left")
@@ -461,8 +477,12 @@ def figure_heatmap(
 
     fig, ax = plt.subplots(figsize=(width, height))
 
-    vmax = max(abs(ordered_df.values.min()), abs(ordered_df.values.max()))
-    vmax = min(vmax, 3.0)  # cap at ±3
+    vals = ordered_df.values
+    finite_vals = vals[np.isfinite(vals)]
+    if len(finite_vals) > 0:
+        vmax = min(max(abs(finite_vals.min()), abs(finite_vals.max())), 3.0)
+    else:
+        vmax = 3.0
 
     im = ax.imshow(
         ordered_df.values,
