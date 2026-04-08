@@ -8,6 +8,7 @@ Run with: streamlit run app.py
 """
 
 import io
+import logging
 import zipfile
 
 import streamlit as st
@@ -15,6 +16,23 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Logging setup — writes to bactrap_hypomap.log alongside app.py
+# ---------------------------------------------------------------------------
+_LOG_FILE = Path(__file__).parent / "bactrap_hypomap.log"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.FileHandler(_LOG_FILE, mode="a"),
+        logging.StreamHandler(),          # also print to terminal
+    ],
+    force=True,
+)
+logger = logging.getLogger(__name__)
+logger.info("="*60)
+logger.info("App startup / Streamlit rerun")
 
 st.set_page_config(
     page_title="bacTRAP → HypoMap Mapping",
