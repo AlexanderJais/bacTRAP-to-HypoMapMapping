@@ -520,10 +520,13 @@ def compute_gsea_enrichment(
         DataFrame with columns: cluster, ES, NES, pvalue, padj,
         n_hits, running_scores, sorted by NES descending.
     """
+    empty_result = (
+        pd.DataFrame(columns=["cluster", "ES", "NES", "pvalue", "padj", "n_hits"]),
+        {},
+        np.array([]),
+    )
     if len(bactrap_matched) == 0 or len(cluster_markers) == 0:
-        return pd.DataFrame(columns=[
-            "cluster", "ES", "NES", "pvalue", "padj", "n_hits",
-        ])
+        return empty_result
 
     # Rank genes by enrichment (descending)
     df_sorted = bactrap_matched.dropna(subset=[enrichment_col]).sort_values(
@@ -542,14 +545,16 @@ def compute_gsea_enrichment(
             weighted=True, enrichment_values=enrichment_vals,
         )
 
-        # Permutation test for significance
+        # Permutation test: shuffle gene labels AND their enrichment values
+        # together so the null preserves the rank-value pairing but
+        # randomizes which genes are in the marker set.
         null_es = np.zeros(n_perm)
         rng = np.random.default_rng(42)
         for p in range(n_perm):
-            perm_genes = rng.permutation(ranked_genes)
+            perm_idx = rng.permutation(len(ranked_genes))
             null_es[p], _ = _running_enrichment_score(
-                perm_genes, marker_set,
-                weighted=True, enrichment_values=enrichment_vals,
+                ranked_genes[perm_idx], marker_set,
+                weighted=True, enrichment_values=enrichment_vals[perm_idx],
             )
 
         # Compute p-value (one-sided for positive enrichment)
@@ -586,6 +591,16 @@ def compute_gsea_enrichment(
 # AUCell Scoring
 # =========================================================================
 
+def _get_raw_gene_names(adata) -> np.ndarray:
+    """Extract gene names from adata.raw, handling Ensembl→symbol lookup."""
+    raw_var_names = np.array(adata.raw.var_names)
+    if len(raw_var_names) > 0 and str(raw_var_names[0]).startswith("ENSMUSG"):
+        for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
+            if col in adata.raw.var.columns:
+                return adata.raw.var[col].values.copy()
+    return raw_var_names
+
+
 def compute_aucell_scores(
     adata,
     gene_names: List[str],
@@ -613,57 +628,40 @@ def compute_aucell_scores(
     Returns:
         Array of AUCell scores, one per cell.
     """
-    adata_gene_names = get_gene_names_from_adata(adata)
-    gene_lower_to_idx = {str(g).lower(): i for i, g in enumerate(adata_gene_names)}
+    # Determine expression source and build gene name lookup
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+        source_gene_names = _get_raw_gene_names(adata)
+    else:
+        X = adata.X
+        source_gene_names = get_gene_names_from_adata(adata)
 
-    # Map input genes to adata.var indices
+    gene_lower_to_idx = {str(g).lower(): i for i, g in enumerate(source_gene_names)}
+
+    # Map input genes to expression matrix column indices
     query_idx = []
     for g in gene_names:
         g_lower = str(g).lower()
         if g_lower in gene_lower_to_idx:
             query_idx.append(gene_lower_to_idx[g_lower])
 
-    if len(query_idx) == 0:
-        return np.zeros(adata.n_obs)
-
-    query_idx_set = set(query_idx)
-
-    if use_raw and adata.raw is not None:
-        X = adata.raw.X
-        # Remap indices to raw space
-        raw_gene_names = get_gene_names_from_adata(
-            type('obj', (object,), {
-                'var_names': adata.raw.var_names,
-                'var': adata.raw.var,
-            })()
-        ) if hasattr(adata.raw, 'var') else adata.raw.var_names
-        raw_lower_to_idx = {}
-        if hasattr(raw_gene_names, '__iter__'):
-            for i, g in enumerate(raw_gene_names):
-                raw_lower_to_idx[str(g).lower()] = i
-
-        query_idx_raw = []
-        for g in gene_names:
-            g_lower = str(g).lower()
-            if g_lower in raw_lower_to_idx:
-                query_idx_raw.append(raw_lower_to_idx[g_lower])
-        query_idx_set = set(query_idx_raw)
-        n_total_genes = X.shape[1]
-    else:
-        X = adata.X
-        n_total_genes = X.shape[1]
-
     n_cells = X.shape[0]
-    n_query = len(query_idx_set)
+    n_total_genes = X.shape[1]
+    n_query = len(query_idx)
 
     if n_query == 0:
         return np.zeros(n_cells)
 
+    # Boolean mask for query genes (vectorized membership test)
+    query_mask = np.zeros(n_total_genes, dtype=bool)
+    query_mask[query_idx] = True
+
     # Number of top genes to consider per cell
     n_top = max(int(n_total_genes * top_fraction), n_query)
     n_top = min(n_top, n_total_genes)
+    max_auc = n_query * n_top
 
-    # Process in cell chunks to limit memory
+    # Process in cell chunks — vectorized within each chunk
     chunk_size = 5000
     scores = np.zeros(n_cells, dtype=np.float32)
 
@@ -675,23 +673,22 @@ def compute_aucell_scores(
         else:
             X_chunk = np.asarray(X_chunk)
 
-        # For each cell, rank genes (descending expression), compute AUC
-        for i in range(X_chunk.shape[0]):
-            cell_expr = X_chunk[i, :]
-            # Get indices of top-ranked genes
-            top_gene_idx = np.argpartition(cell_expr, -n_top)[-n_top:]
-            # Sort them by expression (descending)
-            top_sorted = top_gene_idx[np.argsort(cell_expr[top_gene_idx])[::-1]]
+        chunk_n = X_chunk.shape[0]
 
-            # Compute recovery: how many query genes appear as we walk down
-            hits = 0
-            auc = 0.0
-            for rank, gene_idx in enumerate(top_sorted):
-                if gene_idx in query_idx_set:
-                    hits += 1
-                auc += hits
-            # Normalize: max possible AUC = n_query * n_top
-            max_auc = n_query * n_top
+        # For each cell, get top-n gene indices via argpartition (O(n) per cell)
+        # Then check which are query genes and compute cumulative AUC
+        top_idx = np.argpartition(X_chunk, -n_top, axis=1)[:, -n_top:]
+
+        for i in range(chunk_n):
+            cell_top = top_idx[i]
+            # Sort by expression descending
+            order = np.argsort(X_chunk[i, cell_top])[::-1]
+            sorted_top = cell_top[order]
+
+            # Vectorized: check query membership and cumsum for AUC
+            is_hit = query_mask[sorted_top]
+            cumhits = np.cumsum(is_hit)
+            auc = cumhits.sum()
             scores[start + i] = auc / max_auc if max_auc > 0 else 0.0
 
     return scores
@@ -769,9 +766,10 @@ def compute_composite_ranking(
                 pctls.append(pctl)
             else:
                 row[f"{method}_rank"] = np.nan
-                row[f"{method}_pctl"] = 0.0
-                pctls.append(0.0)
-        row["composite_score"] = np.mean(pctls)
+                row[f"{method}_pctl"] = np.nan
+                pctls.append(np.nan)
+        # nanmean: only average over methods that have data for this cluster
+        row["composite_score"] = float(np.nanmean(pctls))
         rows.append(row)
 
     df = pd.DataFrame(rows)

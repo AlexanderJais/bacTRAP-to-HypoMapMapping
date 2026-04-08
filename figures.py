@@ -779,7 +779,7 @@ def figure_composite_ranking(
     # Add composite score as right-side annotation
     for i, (_, row) in enumerate(df.iterrows()):
         ax.text(
-            n_methods - 0.3, i, f"{row['composite_score']:.2f}",
+            n_methods + 0.3, i, f"{row['composite_score']:.2f}",
             ha="left", va="center", fontsize=5, fontweight="bold",
         )
 

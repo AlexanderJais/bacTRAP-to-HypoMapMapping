@@ -308,12 +308,12 @@ if run_button or st.session_state.analysis_done:
     progress.progress(65, text="Running GSEA enrichment...")
 
     # ---- GSEA enrichment ----
-    gsea_result = compute_gsea_enrichment(
-        bactrap_matched, markers, n_perm=1000,
-    )
-    if isinstance(gsea_result, tuple) and len(gsea_result) == 3:
-        gsea_df, gsea_running_scores, gsea_ranked_genes = gsea_result
-    else:
+    try:
+        gsea_df, gsea_running_scores, gsea_ranked_genes = compute_gsea_enrichment(
+            bactrap_matched, markers, n_perm=1000,
+        )
+    except Exception as e:
+        st.warning(f"GSEA computation failed: {e}")
         gsea_df = pd.DataFrame()
         gsea_running_scores = {}
         gsea_ranked_genes = np.array([])

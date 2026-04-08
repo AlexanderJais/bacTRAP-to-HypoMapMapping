@@ -200,10 +200,8 @@ def _extract_gene_submatrix(
 
     if use_raw and adata.raw is not None:
         X = adata.raw.X
-        if X.shape[1] != adata.X.shape[1]:
-            raw_indices, survived_mask = _map_var_indices_to_raw(adata, gene_indices)
-            gene_indices = raw_indices
-        # else: same shape, indices are directly usable
+        raw_indices, survived_mask = _map_var_indices_to_raw(adata, gene_indices)
+        gene_indices = raw_indices
     else:
         X = adata.X
 
@@ -217,12 +215,13 @@ def _extract_gene_submatrix(
     max_idx = X.shape[1]
     valid = gene_indices < max_idx
     if not np.all(valid):
-        gene_indices = gene_indices[valid]
-        # Update survived_mask: mark out-of-bounds as not survived
+        # survived_positions maps each entry in gene_indices (post-mapping)
+        # back to its position in the original gene_indices array
         survived_positions = np.where(survived_mask)[0]
-        for pos, is_valid in zip(survived_positions, valid):
+        for i, is_valid in enumerate(valid):
             if not is_valid:
-                survived_mask[pos] = False
+                survived_mask[survived_positions[i]] = False
+        gene_indices = gene_indices[valid]
         n_genes = len(gene_indices)
 
     if n_genes == 0:
