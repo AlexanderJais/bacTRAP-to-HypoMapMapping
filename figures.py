@@ -123,6 +123,10 @@ def figure_correlation_barplot(
     cmap = plt.colormaps["viridis"]
     colors = [cmap(norm(v)) for v in df["spearman_r"]]
 
+    # Determine significance status per bar (both Pearson & Spearman p < 0.05)
+    has_sig_col = "both_significant" in df.columns
+    is_sig = df["both_significant"].values if has_sig_col else np.ones(n_bars, dtype=bool)
+
     bars = ax.barh(
         range(n_bars),
         df["spearman_r"],
@@ -131,13 +135,23 @@ def figure_correlation_barplot(
         height=0.7,
     )
 
-    # Add r-value text
+    # Hatch non-significant bars (Pearson p >= 0.05)
+    for i, bar in enumerate(bars):
+        if not is_sig[i]:
+            bar.set_hatch("//")
+            bar.set_edgecolor("grey")
+            bar.set_alpha(0.6)
+
+    # Add r-value text (with n.s. annotation for non-significant clusters)
     for i, (_, row) in enumerate(df.iterrows()):
         r_val = row["spearman_r"]
         offset = 0.005 if r_val >= 0 else -0.005
         ha = "left" if r_val >= 0 else "right"
+        label = f"{r_val:.3f}"
+        if has_sig_col and not row["both_significant"]:
+            label += " (n.s.)"
         ax.text(
-            r_val + offset, i, f"{r_val:.3f}",
+            r_val + offset, i, label,
             va="center", ha=ha, fontsize=5,
         )
 

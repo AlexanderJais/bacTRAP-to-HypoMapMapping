@@ -375,7 +375,13 @@ if run_button or st.session_state.analysis_done:
         n_dropped = len(top_enriched_genes) - len(enriched_gene_indices)
         if n_dropped > 0:
             st.warning(f"{n_dropped} enriched gene(s) could not be mapped back to HypoMap indices and were excluded from the dot plot.")
-        top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
+        # Prefer clusters significant by both Pearson and Spearman for downstream
+        # displays; fall back to all clusters if too few pass the dual filter.
+        if len(corr_df) > 0 and "both_significant" in corr_df.columns:
+            sig_clusters = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
+            top_clusters_corr = sig_clusters[:15] if len(sig_clusters) >= 5 else corr_df["cluster"].tolist()[:15]
+        else:
+            top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
 
         frac_expr = compute_fraction_expressing(
             adata, enriched_gene_indices, annotation_col,
@@ -389,7 +395,11 @@ if run_button or st.session_state.analysis_done:
         )
 
         # ---- Z-score heatmap data ----
-        top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
+        if len(corr_df) > 0 and "both_significant" in corr_df.columns:
+            sig_clusters_hm = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
+            top_clusters_heatmap = sig_clusters_hm[:20] if len(sig_clusters_hm) >= 5 else corr_df["cluster"].tolist()[:20]
+        else:
+            top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
         top_genes_heatmap = top_enriched_genes[:30]
         zscore_df = compute_zscore_heatmap_data(
             cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
@@ -646,15 +656,37 @@ if run_button or st.session_state.analysis_done:
 
         if len(corr_df) > 0:
             st.subheader("Top Correlated Clusters")
-            st.dataframe(
-                corr_df.style.format({
+
+            # Highlight rows where Pearson is not significant (less credible)
+            if "both_significant" in corr_df.columns:
+                n_sig = int(corr_df["both_significant"].sum())
+                n_total = len(corr_df)
+                st.caption(
+                    f"**{n_sig}/{n_total}** clusters significant by both Pearson and "
+                    f"Spearman (p < 0.05). Rows where Pearson is not significant are "
+                    f"highlighted — concordance between both tests is stronger evidence."
+                )
+
+                def _highlight_nonsig(row):
+                    if "both_significant" in row.index and not row["both_significant"]:
+                        return ["background-color: #fff3cd"] * len(row)
+                    return [""] * len(row)
+
+                styled = corr_df.style.apply(_highlight_nonsig, axis=1).format({
                     "pearson_r": "{:.4f}",
                     "pearson_pval": "{:.2e}",
                     "spearman_r": "{:.4f}",
                     "spearman_pval": "{:.2e}",
-                }),
-                use_container_width=True,
-            )
+                })
+            else:
+                styled = corr_df.style.format({
+                    "pearson_r": "{:.4f}",
+                    "pearson_pval": "{:.2e}",
+                    "spearman_r": "{:.4f}",
+                    "spearman_pval": "{:.2e}",
+                })
+
+            st.dataframe(styled, use_container_width=True)
 
             st.subheader("Figure A: Correlation Barplot")
             fig_a = figure_correlation_barplot(corr_df, top_n=20, double_column=double_column)
@@ -777,9 +809,13 @@ if run_button or st.session_state.analysis_done:
                 )
             plt.close(fig_d)
 
-            # Dotplot — use correlation-ranked clusters for biological relevance
+            # Dotplot — use correlation-ranked clusters (preferring dual-significant)
             st.subheader("Figure C: Enriched Gene Dot Plot")
-            dotplot_clusters = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
+            if len(corr_df) > 0 and "both_significant" in corr_df.columns:
+                _sig_dp = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
+                dotplot_clusters = _sig_dp[:15] if len(_sig_dp) >= 5 else corr_df["cluster"].tolist()[:15]
+            else:
+                dotplot_clusters = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
             dotplot_genes = top_enriched_genes[:20]
             fig_c = figure_dotplot(
                 enriched_mean_expr, frac_expr,

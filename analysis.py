@@ -113,8 +113,14 @@ def compute_enrichment_correlation(
     df = pd.DataFrame(results)
     if len(df) > 0:
         df = df.sort_values("spearman_r", ascending=False).reset_index(drop=True)
-        logger.info("  correlation result: %d clusters, top spearman_r=%.4f (%s)",
-                    len(df), df["spearman_r"].iloc[0], df["cluster"].iloc[0])
+        # Flag clusters where both Pearson and Spearman are significant —
+        # concordance between parametric and rank-based tests is stronger evidence.
+        df["both_significant"] = (df["pearson_pval"] < 0.05) & (df["spearman_pval"] < 0.05)
+        n_both = int(df["both_significant"].sum())
+        logger.info("  correlation result: %d clusters, top spearman_r=%.4f (%s), "
+                    "%d/%d significant by both Pearson and Spearman (p<0.05)",
+                    len(df), df["spearman_r"].iloc[0], df["cluster"].iloc[0],
+                    n_both, len(df))
     else:
         logger.warning("  correlation result: 0 clusters (all had zero variance)")
     return df
