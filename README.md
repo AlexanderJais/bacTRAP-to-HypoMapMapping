@@ -1,6 +1,6 @@
 # bacTRAP-to-HypoMap Mapping Tool
 
-A Streamlit application for mapping bacTRAP (Translating Ribosome Affinity Purification) bulk RNA-seq data onto the murine [HypoMap](https://doi.org/10.1038/s42255-022-00657-y) single-cell atlas (Steuernagel et al., *Nature Metabolism* 2022). Identifies which hypothalamic cell types best match the translational profile captured by a bacTRAP pulldown using six complementary methods, and produces publication-ready, Nature-grade figures exportable as PDF/SVG.
+A Streamlit application for mapping bacTRAP (Translating Ribosome Affinity Purification) bulk RNA-seq data onto the murine [HypoMap](https://doi.org/10.1038/s42255-022-00657-y) single-cell atlas (Steuernagel et al., *Nature Metabolism* 2022). Identifies which hypothalamic cell types best match the translational profile captured by a bacTRAP pulldown using five complementary methods, and produces publication-ready, Nature-grade figures exportable as PDF/SVG.
 
 ---
 
@@ -24,24 +24,25 @@ You provide two files via the app's sidebar:
 
 ### 1. bacTRAP FPKM Table (`.xlsx`)
 
-An Excel file containing DESeq2 differential expression results from a bacTRAP experiment. Expected columns:
+An Excel file containing DESeq2 differential expression results from a bacTRAP experiment. Required columns:
+
+| Column | Description |
+|---|---|
+| `log2FoldChange` | DESeq2 log2 fold change (IP vs Input) |
+| `padj` | Benjamini-Hochberg adjusted p-value |
+
+The gene identifier column is **auto-detected**. The app tests all candidate columns (including `gene_id`, `gene_name`, and the DataFrame index) against the HypoMap gene lookup and selects the column yielding the highest match rate. Both Ensembl IDs and gene symbols are supported. You can override the auto-selection via the "bacTRAP gene column" dropdown in the sidebar.
+
+Additional columns that will be used if present:
 
 | Column | Description |
 |---|---|
 | `gene_id` | Ensembl gene IDs (e.g. `ENSMUSG00000074604`) |
 | `gene_name` | Gene symbols (e.g. `Mgst2`) |
-| `PoA_IP1_fpkm` ... `PoA_IP3_fpkm` | Per-replicate FPKM for IP samples |
-| `PoA_Input1_fpkm` ... `PoA_Input3_fpkm` | Per-replicate FPKM for Input samples |
-| `PoA_IP1_count` ... `PoA_Input3_count` | Per-replicate raw counts |
 | `IP` | Mean IP expression across replicates |
 | `Input` | Mean Input expression across replicates |
-| `log2FoldChange` | DESeq2 log2 fold change (IP vs Input) |
-| `pvalue` | DESeq2 raw p-value |
-| `padj` | Benjamini-Hochberg adjusted p-value |
 | `gene_biotype` | Gene biotype annotation |
 | `gene_description` | Gene description |
-| `gene_chr` | Chromosome |
-| `gene_length` | Gene length in bp |
 
 ### 2. HypoMap Atlas (`.h5ad`)
 
@@ -51,7 +52,9 @@ The HypoMap AnnData object (~384,925 cells). Download from [CellxGene](https://c
 - Cell-type annotations at one or more hierarchical levels in `.obs`
 - UMAP coordinates in `.obsm['X_umap']`
 
-The app inspects `.obs` columns on load and lets you select which annotation level to use.
+The app inspects `.obs` columns on load and lets you select which annotation level to use (e.g. `C7_named`, `C25_named`, `C66_named`, `C185_named`, `C286_named`, `C465_named`).
+
+**Gene name handling:** When atlas `var_names` are Ensembl IDs, the app resolves gene symbols from the `feature_name` column in `var` metadata (or `raw.var`). If no symbol column is found in `raw.var`, it falls back to building an Ensembl-to-symbol map from `adata.var`. Both gene symbols and Ensembl IDs are indexed in the lookup, so matching works regardless of the bacTRAP identifier format.
 
 ---
 
@@ -63,7 +66,8 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 |---|---|---|
 | bacTRAP file path | Path to the `.xlsx` file | -- |
 | HypoMap file path | Path to the `.h5ad` file | -- |
-| Annotation column | Cell-type label column from `.obs` | Auto-detected |
+| Annotation column | Cell-type label column from `.obs` | Auto-detected (prefers `C185_named`) |
+| bacTRAP gene column | Column containing gene identifiers | Auto-detected (highest match rate) |
 | padj cutoff | Adjusted p-value threshold for enriched genes | 0.05 |
 | log2FC cutoff | Minimum log2 fold change for enriched genes | 1.0 |
 | Top N genes | Number of top enriched genes for scoring | 50 |
@@ -76,26 +80,26 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 
 | Tab | Contents |
 |---|---|
-| **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, data preview |
-| **Correlation** | Ranked cluster table + Figure A (correlation barplot) |
-| **UMAP Projection** | Figure B (two-panel UMAP: cell types + enrichment score) |
-| **Marker Overlap** | Fisher's test table + Figure C (dot plot) + Figure D (volcano plot) |
-| **Heatmap** | Figure E (z-scored heatmap of top genes across top clusters) |
-| **NNLS Deconvolution** | NNLS weights table + Figure F (weight barplot) |
-| **GSEA** | GSEA results table + Figures G (enrichment curves) + H (NES barplot) + I (AUCell UMAP) |
-| **Composite Ranking** | Multi-method consensus table + Figure J (ranking heatmap) |
-| **Export** | Download all figures (ZIP of PDF+SVG) and all result tables (CSV) |
+| **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, bacTRAP volcano plot, gene matching diagnostics |
+| **Correlation** | Ranked cluster table + correlation barplot |
+| **UMAP Projection** | Two-panel UMAP: cell types + enrichment score |
+| **Marker Overlap** | Fisher's test table + dot plot + Fisher volcano plot |
+| **Heatmap** | Z-scored heatmap of top genes across top clusters |
+| **NNLS Deconvolution** | NNLS weights table + weight barplot |
+| **GSEA** | GSEA results table + enrichment curves + NES barplot + AUCell UMAP |
+| **Export** | Download all figures (ZIP of PDF+SVG), all result tables (CSV), and diagnostic log file |
 
 ---
 
 ## Analysis Pipeline
 
-### 1. Data Loading & QC
+### 1. Data Loading & Gene Matching
 
 - Loads both files with Streamlit caching (`@st.cache_resource` for the large h5ad).
-- Matches `gene_name` from the bacTRAP table to HypoMap gene names using case-insensitive matching. If HypoMap `var_names` are Ensembl IDs, it falls back to `var['gene_name']` or similar columns.
-- When `adata.raw` has a different gene set than `adata.var` (common after gene filtering), indices are remapped via `_map_var_indices_to_raw()` with a `survived_mask` to keep gene names aligned.
-- Reports overlap statistics and enriched gene counts.
+- Builds a comprehensive bidirectional gene lookup from the HypoMap raw layer (51,216 genes), indexing both resolved gene symbols and Ensembl IDs.
+- Auto-detects the best bacTRAP gene column by testing all candidates against the lookup. Achieves ~95% match rate with typical DESeq2 output.
+- Deduplicates matched genes when multiple Ensembl IDs resolve to the same symbol.
+- Reports overlap statistics, match diagnostics (sample gene names from both datasets), and enriched gene counts.
 
 ### 2. Enrichment Correlation
 
@@ -116,6 +120,7 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 
 - Computes a per-cell "bacTRAP enrichment score" as the z-scored mean expression of the top N enriched genes.
 - Projects this score onto the HypoMap UMAP alongside the cell-type annotation for side-by-side comparison.
+- Cell-type legend placed below the annotation panel to avoid overlap.
 - Subsamples cells for rendering performance (configurable, default 50k).
 
 ### 5. Gene Expression Heatmap
@@ -146,12 +151,6 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 - Vectorized implementation processes cells in chunks with `np.cumsum`-based AUC for performance on large atlases.
 - Output: per-cell AUCell scores projected onto the HypoMap UMAP.
 
-### 9. Composite Consensus Ranking
-
-- Converts each method's scores (Correlation, Fisher's, NNLS, GSEA) to percentile ranks (0--1).
-- Averages percentiles across methods using `nanmean` so clusters detected by only some methods are not penalized.
-- Produces a single robust ranking that doesn't depend on any single method's assumptions.
-
 ---
 
 ## Figures
@@ -177,16 +176,16 @@ All figures follow Nature journal specifications:
 
 | Figure | Type | Description |
 |---|---|---|
+| **Volcano** | Scatter plot | bacTRAP gene-level volcano (log2FC vs -log10 padj), with Pnoc and top enriched genes labeled |
 | **A** | Horizontal barplot | Top 20 clusters by Spearman correlation, colored by rho |
-| **B** | Two-panel UMAP | Left: cell-type annotation, Right: bacTRAP enrichment score (magma) |
-| **C** | Dot plot | Top enriched genes vs top clusters (size = % expressing, color = mean expression) |
+| **B** | Two-panel UMAP | Left: cell-type annotation (legend below), Right: bacTRAP enrichment score (magma) |
+| **C** | Dot plot | Top enriched genes vs correlation-ranked clusters (size = % expressing, color = mean expression) |
 | **D** | Volcano plot | log2(odds ratio) vs -log10(p-value) from Fisher's test, top hits labeled |
 | **E** | Heatmap | Z-scored expression, genes clustered by Ward's linkage, diverging RdBu_r colormap |
 | **F** | Horizontal barplot | NNLS deconvolution weights per cluster (magma colormap) |
-| **G** | Line plot | Running GSEA enrichment score curves for top 5 clusters |
+| **G** | Line plot | Running GSEA enrichment score curves for top 5 clusters (legend right of plot) |
 | **H** | Horizontal barplot | Normalized Enrichment Scores with FDR significance coloring |
 | **I** | UMAP | AUCell enrichment scores projected onto HypoMap UMAP (magma) |
-| **J** | Heatmap | Multi-method percentile scores per cluster (YlOrRd, annotated cells) |
 
 ---
 
@@ -194,10 +193,11 @@ All figures follow Nature journal specifications:
 
 ```
 bacTRAP-to-HypoMapMapping/
-├── app.py              # Main Streamlit application (UI, 9 tabs, orchestration)
+├── app.py              # Main Streamlit application (UI, 8 tabs, orchestration)
 ├── data_loading.py     # Data I/O, gene matching, cluster expression computation
 ├── analysis.py         # All analysis methods (correlation, Fisher, NNLS, GSEA, AUCell)
-├── figures.py          # Nature-grade figure generation (Figures A–J) and export
+├── figures.py          # Nature-grade figure generation and export
+├── METHODS.md          # Publication-ready Materials & Methods and figure legends
 ├── requirements.txt    # Python dependencies
 └── README.md           # This file
 ```
@@ -205,18 +205,20 @@ bacTRAP-to-HypoMapMapping/
 ### Module Responsibilities
 
 **`data_loading.py`**
-- `load_hypomap()` -- cached h5ad loading with sparse matrix enforcement
-- `load_bactrap()` -- cached Excel loading
+- `load_hypomap()` -- cached h5ad loading with sparse matrix enforcement; logs structure details
+- `load_bactrap()` -- cached Excel loading; logs columns, dtypes, sample values
 - `get_annotation_columns()` -- discovers categorical/string `.obs` columns
-- `match_genes()` -- case-insensitive gene symbol matching between datasets
-- `_map_var_indices_to_raw()` -- translates adata.var indices to adata.raw.var space with a survived_mask for correct gene name alignment
+- `_build_adata_gene_lookup()` -- comprehensive bidirectional lookup (symbols + Ensembl IDs)
+- `_auto_select_gene_col()` -- tests all bacTRAP columns, picks best match rate
+- `match_genes()` -- gene matching with auto-detection and deduplication
+- `_map_var_indices_to_raw()` -- translates adata.var indices to adata.raw.var space
 - `_extract_gene_submatrix()` -- memory-efficient column extraction with chunk processing
-- `compute_cluster_mean_expression()` -- mean expression per cluster for a gene set
-- `compute_fraction_expressing()` -- fraction of cells expressing per cluster
+- `compute_cluster_mean_expression()` -- mean expression per cluster (deduplicates index)
+- `compute_fraction_expressing()` -- fraction of cells expressing per cluster (deduplicates index)
 
 **`analysis.py`**
-- `compute_enrichment_correlation()` -- Pearson + Spearman correlation per cluster (NaN-safe)
-- `get_enriched_genes()` -- filter by padj and log2FC thresholds
+- `compute_enrichment_correlation()` -- Pearson + Spearman correlation per cluster (NaN-safe, dedup-safe)
+- `get_enriched_genes()` -- filter by padj and log2FC thresholds (with column validation)
 - `compute_marker_genes()` -- Wilcoxon-based marker detection via scanpy (Ensembl-to-symbol conversion)
 - `load_precomputed_markers()` -- attempts to read `.uns['rank_genes_groups']`
 - `fisher_overlap_test()` -- one-sided Fisher's exact test with FDR correction
@@ -229,18 +231,32 @@ bacTRAP-to-HypoMapMapping/
 
 **`figures.py`**
 - `setup_nature_style()` -- global matplotlib configuration for Nature specs
-- `figure_correlation_barplot()` -- Figure A
-- `figure_umap_enrichment()` -- Figure B
-- `figure_dotplot()` -- Figure C
-- `figure_volcano_enrichment()` -- Figure D
-- `figure_heatmap()` -- Figure E
-- `figure_nnls_barplot()` -- Figure F
-- `figure_gsea_curves()` -- Figure G
-- `figure_gsea_barplot()` -- Figure H
-- `figure_aucell_umap()` -- Figure I
-- `figure_composite_ranking()` -- Figure J
+- `figure_bactrap_volcano()` -- bacTRAP gene-level volcano with highlight support
+- `figure_correlation_barplot()` -- correlation barplot
+- `figure_umap_enrichment()` -- two-panel UMAP (cell types + enrichment)
+- `figure_dotplot()` -- enriched gene dot plot
+- `figure_volcano_enrichment()` -- Fisher's test volcano
+- `figure_heatmap()` -- z-scored expression heatmap
+- `figure_nnls_barplot()` -- NNLS weight barplot
+- `figure_gsea_curves()` -- running enrichment score curves
+- `figure_gsea_barplot()` -- NES barplot
+- `figure_aucell_umap()` -- AUCell UMAP projection
 - `fig_to_bytes()` -- convert figure to PDF/SVG bytes
-- `create_all_figures_zip()` -- bundle all figures into a ZIP archive
+
+---
+
+## Logging
+
+The application writes a detailed log to `bactrap_hypomap.log` in the app directory. The log captures:
+
+- HypoMap structure: var_names, raw.var_names, all column names, sample values
+- bacTRAP structure: all columns, dtypes, sample values from every string column
+- Gene name resolution: Ensembl detection, symbol column search, fallback attempts
+- Lookup construction: final size, sample entries
+- Auto-detection: per-column match counts for gene column selection
+- Match results: matched/unmatched gene samples, deduplication counts, final match rate
+
+The log file can be downloaded from the **Export** tab (standalone or included in the figures ZIP).
 
 ---
 
@@ -281,7 +297,7 @@ bacTRAP-to-HypoMapMapping/
 
 The bacTRAP IP sample is already enriched for a specific Cre-expressing neuronal population via ribosomal tagging in the preoptic area (PoA). This is **not** a standard bulk deconvolution problem -- the goal is to identify which HypoMap cell types/subtypes best match the translational profile captured by the bacTRAP pulldown. All labels and metrics in the app reflect this framing (e.g., "bacTRAP enrichment score", not "cell-type proportion").
 
-The tool applies six complementary approaches (correlation, Fisher's overlap, NNLS deconvolution, GSEA, AUCell, and composite ranking) to provide a robust, multi-method consensus on which cell populations are captured by the bacTRAP pulldown.
+The tool applies five complementary approaches (correlation, Fisher's overlap, NNLS deconvolution, GSEA, and AUCell) to provide a robust, multi-method consensus on which cell populations are captured by the bacTRAP pulldown.
 
 ---
 
@@ -291,3 +307,5 @@ The tool applies six complementary approaches (correlation, Fisher's overlap, NN
 - Heiman, M. et al. A translational profiling approach for the molecular characterization of CNS cell types. *Cell* **135**, 738--748 (2008).
 - Subramanian, A. et al. Gene set enrichment analysis: a knowledge-based approach. *PNAS* **102**, 15545--15550 (2005).
 - Aibar, S. et al. SCENIC: single-cell regulatory network inference and clustering. *Nature Methods* **14**, 1083--1086 (2017).
+- Love, M. I., Huber, W. & Anders, S. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. *Genome Biology* **15**, 550 (2014).
+- Wolf, F. A., Angerer, P. & Theis, F. J. SCANPY: large-scale single-cell gene expression data analysis. *Genome Biology* **19**, 15 (2018).
