@@ -12,18 +12,15 @@ All figures follow Nature journal specifications:
 """
 
 import io
-import zipfile
 import numpy as np
 import pandas as pd
-import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 from matplotlib.colors import Normalize
 from matplotlib import cm
 import seaborn as sns
 from scipy.cluster.hierarchy import linkage, leaves_list
 from adjustText import adjust_text
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Dict
 
 
 # ---------------------------------------------------------------------------
@@ -923,14 +920,3 @@ def fig_to_bytes(fig: plt.Figure, fmt: str = "pdf") -> bytes:
     return buf.getvalue()
 
 
-def create_all_figures_zip(figures: Dict[str, plt.Figure]) -> bytes:
-    """Create a ZIP archive containing all figures as PDF and SVG."""
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for name, fig in figures.items():
-            pdf_bytes = fig_to_bytes(fig, "pdf")
-            svg_bytes = fig_to_bytes(fig, "svg")
-            zf.writestr(f"{name}.pdf", pdf_bytes)
-            zf.writestr(f"{name}.svg", svg_bytes)
-    buf.seek(0)
-    return buf.getvalue()

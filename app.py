@@ -186,7 +186,6 @@ from figures import (
     figure_gsea_curves,
     figure_gsea_barplot,
     figure_aucell_umap,
-    figure_composite_ranking,
     fig_to_bytes,
 )
 

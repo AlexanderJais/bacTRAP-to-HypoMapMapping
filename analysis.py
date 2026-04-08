@@ -70,7 +70,7 @@ def compute_enrichment_correlation(
     valid_mask = np.isfinite(enrichment)
     if not np.all(valid_mask):
         enrichment = enrichment[valid_mask]
-        expr_sub = expr_sub.iloc[valid_mask]
+        expr_sub = expr_sub[valid_mask]
     if len(enrichment) < 3:
         return pd.DataFrame(columns=[
             "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
@@ -115,6 +115,12 @@ def get_enriched_genes(
 
     Returns subset of bactrap_df passing both padj and log2FC thresholds.
     """
+    for required_col in ("padj", "log2FoldChange"):
+        if required_col not in bactrap_df.columns:
+            raise ValueError(
+                f"Required column '{required_col}' not found in bacTRAP data. "
+                f"Available columns: {list(bactrap_df.columns)}"
+            )
     mask = (
         (bactrap_df["padj"].notna())
         & (bactrap_df["padj"] < padj_cutoff)
@@ -447,18 +453,16 @@ def compute_nnls_deconvolution(
     A = expr_sub.values.astype(float)  # (genes, clusters)
     b = enrichment.astype(float)
 
-    # Shift b so it's non-negative (NNLS requires non-negative target
-    # only in the weights, but shifting can help convergence)
     w, residual = nnls(A, b)
 
-    clusters = cluster_mean_expr.columns.tolist()
+    clusters = expr_sub.columns.tolist()
     df = pd.DataFrame({
         "cluster": clusters,
         "weight": w,
     })
     total = df["weight"].sum()
     df["weight_norm"] = df["weight"] / total if total > 0 else 0.0
-    df["residual"] = residual
+    df["global_residual_norm"] = residual
     df = df.sort_values("weight", ascending=False).reset_index(drop=True)
     return df
 
