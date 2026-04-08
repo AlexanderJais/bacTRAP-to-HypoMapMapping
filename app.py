@@ -768,41 +768,42 @@ if run_button or st.session_state.analysis_done:
                 "gsea_results.csv", "text/csv",
                 key="dl_gsea_csv",
             )
-
-            # AUCell UMAP (shown here alongside GSEA as a complementary view)
-            st.markdown("---")
-            st.subheader("Figure I: AUCell Enrichment UMAP")
-            st.markdown(
-                "AUCell (rank-based Area Under the Curve) scores per cell — "
-                "more robust than mean expression because it's rank-based and "
-                "threshold-free."
-            )
-            fig_i = figure_aucell_umap(
-                umap_coords, aucell_scores,
-                double_column=double_column,
-                subsample_idx=sub_indices,
-            )
-            st.pyplot(fig_i)
-            _cache_fig("fig_i_aucell_umap", fig_i)
-
-            col_pdf, col_svg = st.columns(2)
-            with col_pdf:
-                st.download_button(
-                    "Download PDF",
-                    st.session_state.fig_bytes["fig_i_aucell_umap"]["pdf"],
-                    "fig_i_aucell_umap.pdf", "application/pdf",
-                    key="dl_fig_i_pdf",
-                )
-            with col_svg:
-                st.download_button(
-                    "Download SVG",
-                    st.session_state.fig_bytes["fig_i_aucell_umap"]["svg"],
-                    "fig_i_aucell_umap.svg", "image/svg+xml",
-                    key="dl_fig_i_svg",
-                )
-            plt.close(fig_i)
         else:
             st.warning("No GSEA results to display.")
+
+        # AUCell UMAP — rendered independently of GSEA results since
+        # AUCell scoring is computed from the enriched gene set directly.
+        st.markdown("---")
+        st.subheader("Figure I: AUCell Enrichment UMAP")
+        st.markdown(
+            "AUCell (rank-based Area Under the Curve) scores per cell — "
+            "more robust than mean expression because it's rank-based and "
+            "threshold-free."
+        )
+        fig_i = figure_aucell_umap(
+            umap_coords, aucell_scores,
+            double_column=double_column,
+            subsample_idx=sub_indices,
+        )
+        st.pyplot(fig_i)
+        _cache_fig("fig_i_aucell_umap", fig_i)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_i_aucell_umap"]["pdf"],
+                "fig_i_aucell_umap.pdf", "application/pdf",
+                key="dl_fig_i_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_i_aucell_umap"]["svg"],
+                "fig_i_aucell_umap.svg", "image/svg+xml",
+                key="dl_fig_i_svg",
+            )
+        plt.close(fig_i)
 
     # ======================================================================
     # TAB 8: Composite Ranking
