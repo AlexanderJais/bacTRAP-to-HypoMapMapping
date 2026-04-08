@@ -385,6 +385,11 @@ def figure_volcano_enrichment(
 
     fig, ax = plt.subplots(figsize=(width, height))
 
+    if len(fisher_df) == 0:
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
     df = fisher_df.copy()
     # Cap extreme values for plotting
     df["log2_odds_ratio"] = df["log2_odds_ratio"].clip(-10, 10)
