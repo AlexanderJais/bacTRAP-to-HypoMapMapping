@@ -297,11 +297,16 @@ def compute_enrichment_score(
         X = adata.raw.X if (use_raw and adata.raw is not None) else adata.X
         X_sub = X[:, gene_idx]
         if sparse.issparse(X_sub):
-            X_sub = np.asarray(X_sub.todense())
-        scores = X_sub.mean(axis=1).A1 if hasattr(X_sub.mean(axis=1), 'A1') else np.asarray(X_sub.mean(axis=1)).flatten()
+            X_sub = np.asarray(X_sub.toarray())
+        else:
+            X_sub = np.asarray(X_sub)
+        scores = X_sub.mean(axis=1).flatten()
         # Z-score
-        if np.std(scores) > 0:
-            scores = (scores - np.mean(scores)) / np.std(scores)
+        std = np.std(scores)
+        if std > 0:
+            scores = (scores - np.mean(scores)) / std
+    finally:
+        del adata_copy
 
     return scores
 

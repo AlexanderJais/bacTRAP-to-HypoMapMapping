@@ -129,7 +129,6 @@ from data_loading import (
     match_genes,
     compute_cluster_mean_expression,
     compute_fraction_expressing,
-    subsample_adata,
     get_gene_names_from_adata,
 )
 from analysis import (
@@ -149,7 +148,6 @@ from figures import (
     figure_volcano_enrichment,
     figure_heatmap,
     fig_to_bytes,
-    create_all_figures_zip,
 )
 
 # Load data with caching
@@ -202,6 +200,14 @@ if run_button or st.session_state.analysis_done:
     progress = st.progress(0, text="Matching genes...")
 
     bactrap_matched, matched_genes, gene_to_idx = match_genes(bactrap_df, adata)
+
+    if len(matched_genes) == 0:
+        progress.empty()
+        st.error("No genes could be matched between the bacTRAP data and HypoMap. "
+                 "Check that gene_name symbols in your bacTRAP file correspond to "
+                 "gene names in the HypoMap atlas.")
+        st.stop()
+
     progress.progress(10, text="Genes matched. Computing cluster means...")
 
     # ---- Cluster mean expression ----
@@ -247,6 +253,9 @@ if run_button or st.session_state.analysis_done:
 
     # ---- Fraction expressing for dotplot ----
     enriched_gene_indices = [gene_to_idx[g] for g in top_enriched_genes if g in gene_to_idx]
+    n_dropped = len(top_enriched_genes) - len(enriched_gene_indices)
+    if n_dropped > 0:
+        st.warning(f"{n_dropped} enriched gene(s) could not be mapped back to HypoMap indices and were excluded from the dot plot.")
     top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
 
     frac_expr = compute_fraction_expressing(
@@ -268,14 +277,10 @@ if run_button or st.session_state.analysis_done:
     progress.progress(95, text="Generating figures...")
 
     # ---- Subsample for UMAP ----
-    adata_sub = subsample_adata(adata, n_cells=umap_subsample)
     sub_indices = None
-    if adata_sub.n_obs < adata.n_obs:
-        # Get indices of subsampled cells in the original adata
-        sub_obs_names = set(adata_sub.obs_names)
-        sub_indices = np.array([
-            i for i, name in enumerate(adata.obs_names) if name in sub_obs_names
-        ])
+    if adata.n_obs > umap_subsample:
+        rng = np.random.default_rng(42)
+        sub_indices = np.sort(rng.choice(adata.n_obs, size=umap_subsample, replace=False))
 
     # Get UMAP coordinates
     umap_key = None
@@ -292,6 +297,16 @@ if run_button or st.session_state.analysis_done:
 
     progress.progress(100, text="Analysis complete!")
     st.session_state.analysis_done = True
+
+    # Pre-generate and cache all figure bytes so the Export tab doesn't
+    # have to regenerate them (the figures get plt.close()'d after display).
+    st.session_state.fig_bytes = {}
+
+    def _cache_fig(name, fig):
+        st.session_state.fig_bytes[name] = {
+            "pdf": fig_to_bytes(fig, "pdf"),
+            "svg": fig_to_bytes(fig, "svg"),
+        }
 
     # ======================================================================
     # TAB 1: Data Overview
@@ -367,17 +382,22 @@ if run_button or st.session_state.analysis_done:
             st.subheader("Figure A: Correlation Barplot")
             fig_a = figure_correlation_barplot(corr_df, top_n=20, double_column=double_column)
             st.pyplot(fig_a)
+            _cache_fig("fig_a_correlation_barplot", fig_a)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
-                    "Download PDF", fig_to_bytes(fig_a, "pdf"),
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_a_correlation_barplot"]["pdf"],
                     "fig_a_correlation.pdf", "application/pdf",
+                    key="dl_fig_a_pdf",
                 )
             with col_svg:
                 st.download_button(
-                    "Download SVG", fig_to_bytes(fig_a, "svg"),
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_a_correlation_barplot"]["svg"],
                     "fig_a_correlation.svg", "image/svg+xml",
+                    key="dl_fig_a_svg",
                 )
             plt.close(fig_a)
 
@@ -385,6 +405,7 @@ if run_button or st.session_state.analysis_done:
                 "Download correlation table (CSV)",
                 corr_df.to_csv(index=False).encode(),
                 "correlation_results.csv", "text/csv",
+                key="dl_corr_csv_tab2",
             )
         else:
             st.warning("No correlation results to display.")
@@ -410,17 +431,22 @@ if run_button or st.session_state.analysis_done:
             subsample_idx=sub_indices,
         )
         st.pyplot(fig_b)
+        _cache_fig("fig_b_umap_enrichment", fig_b)
 
         col_pdf, col_svg = st.columns(2)
         with col_pdf:
             st.download_button(
-                "Download PDF", fig_to_bytes(fig_b, "pdf"),
+                "Download PDF",
+                st.session_state.fig_bytes["fig_b_umap_enrichment"]["pdf"],
                 "fig_b_umap.pdf", "application/pdf",
+                key="dl_fig_b_pdf",
             )
         with col_svg:
             st.download_button(
-                "Download SVG", fig_to_bytes(fig_b, "svg"),
+                "Download SVG",
+                st.session_state.fig_bytes["fig_b_umap_enrichment"]["svg"],
                 "fig_b_umap.svg", "image/svg+xml",
+                key="dl_fig_b_svg",
             )
         plt.close(fig_b)
 
@@ -455,17 +481,22 @@ if run_button or st.session_state.analysis_done:
                 double_column=double_column,
             )
             st.pyplot(fig_d)
+            _cache_fig("fig_d_volcano_enrichment", fig_d)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
-                    "Download PDF", fig_to_bytes(fig_d, "pdf"),
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_d_volcano_enrichment"]["pdf"],
                     "fig_d_volcano.pdf", "application/pdf",
+                    key="dl_fig_d_pdf",
                 )
             with col_svg:
                 st.download_button(
-                    "Download SVG", fig_to_bytes(fig_d, "svg"),
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_d_volcano_enrichment"]["svg"],
                     "fig_d_volcano.svg", "image/svg+xml",
+                    key="dl_fig_d_svg",
                 )
             plt.close(fig_d)
 
@@ -479,17 +510,22 @@ if run_button or st.session_state.analysis_done:
                 double_column=True,
             )
             st.pyplot(fig_c)
+            _cache_fig("fig_c_dotplot", fig_c)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
-                    "Download PDF", fig_to_bytes(fig_c, "pdf"),
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_c_dotplot"]["pdf"],
                     "fig_c_dotplot.pdf", "application/pdf",
+                    key="dl_fig_c_pdf",
                 )
             with col_svg:
                 st.download_button(
-                    "Download SVG", fig_to_bytes(fig_c, "svg"),
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_c_dotplot"]["svg"],
                     "fig_c_dotplot.svg", "image/svg+xml",
+                    key="dl_fig_c_svg",
                 )
             plt.close(fig_c)
 
@@ -497,6 +533,7 @@ if run_button or st.session_state.analysis_done:
                 "Download Fisher's test results (CSV)",
                 fisher_df.to_csv(index=False).encode(),
                 "fisher_test_results.csv", "text/csv",
+                key="dl_fisher_csv_tab4",
             )
         else:
             st.warning("No marker overlap results to display.")
@@ -515,17 +552,22 @@ if run_button or st.session_state.analysis_done:
             st.subheader("Figure E: Heatmap")
             fig_e = figure_heatmap(zscore_df, double_column=double_column)
             st.pyplot(fig_e)
+            _cache_fig("fig_e_heatmap", fig_e)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
-                    "Download PDF", fig_to_bytes(fig_e, "pdf"),
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_e_heatmap"]["pdf"],
                     "fig_e_heatmap.pdf", "application/pdf",
+                    key="dl_fig_e_pdf",
                 )
             with col_svg:
                 st.download_button(
-                    "Download SVG", fig_to_bytes(fig_e, "svg"),
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_e_heatmap"]["svg"],
                     "fig_e_heatmap.svg", "image/svg+xml",
+                    key="dl_fig_e_svg",
                 )
             plt.close(fig_e)
         else:
@@ -540,48 +582,27 @@ if run_button or st.session_state.analysis_done:
         st.subheader("Figures")
         st.markdown("Download all figures as a ZIP archive (PDF + SVG).")
 
-        # Re-generate figures for export (they were closed above)
-        all_figs = {}
-        all_figs["fig_a_correlation_barplot"] = figure_correlation_barplot(
-            corr_df, top_n=20, double_column=double_column,
-        )
-        all_figs["fig_b_umap_enrichment"] = figure_umap_enrichment(
-            umap_coords=umap_coords,
-            cell_labels=cell_labels,
-            enrichment_scores=enrichment_scores,
-            double_column=True,
-            point_size=0.3,
-            subsample_idx=sub_indices,
-        )
-        if len(fisher_df) > 0:
-            top_fisher_clusters = fisher_df["cluster"].tolist()[:10]
-            dotplot_genes = top_enriched_genes[:20]
-            all_figs["fig_c_dotplot"] = figure_dotplot(
-                enriched_mean_expr, frac_expr,
-                dotplot_genes, top_fisher_clusters,
-                double_column=True,
-            )
-            all_figs["fig_d_volcano_enrichment"] = figure_volcano_enrichment(
-                fisher_df, pval_threshold=padj_cutoff,
-                double_column=double_column,
-            )
-        if not zscore_df.empty:
-            all_figs["fig_e_heatmap"] = figure_heatmap(
-                zscore_df, double_column=double_column,
-            )
+        # Build ZIP from cached figure bytes (no regeneration needed)
+        cached_bytes = st.session_state.get("fig_bytes", {})
+        if cached_bytes:
+            import io, zipfile
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for name, fmt_dict in cached_bytes.items():
+                    zf.writestr(f"{name}.pdf", fmt_dict["pdf"])
+                    zf.writestr(f"{name}.svg", fmt_dict["svg"])
+            buf.seek(0)
 
-        zip_bytes = create_all_figures_zip(all_figs)
-        st.download_button(
-            "Download All Figures (ZIP)",
-            zip_bytes,
-            "bactrap_hypomap_figures.zip",
-            "application/zip",
-            use_container_width=True,
-        )
-
-        # Clean up export figures
-        for fig in all_figs.values():
-            plt.close(fig)
+            st.download_button(
+                "Download All Figures (ZIP)",
+                buf.getvalue(),
+                "bactrap_hypomap_figures.zip",
+                "application/zip",
+                use_container_width=True,
+                key="dl_all_figs_zip",
+            )
+        else:
+            st.info("Run the analysis first to generate figures.")
 
         st.markdown("---")
         st.subheader("Tables")
@@ -592,6 +613,7 @@ if run_button or st.session_state.analysis_done:
                 "Correlation results (CSV)",
                 corr_df.to_csv(index=False).encode(),
                 "correlation_results.csv", "text/csv",
+                key="dl_corr_csv_export",
             )
         with col_t2:
             if len(fisher_df) > 0:
@@ -599,6 +621,7 @@ if run_button or st.session_state.analysis_done:
                     "Fisher's test results (CSV)",
                     fisher_df.to_csv(index=False).encode(),
                     "fisher_test_results.csv", "text/csv",
+                    key="dl_fisher_csv_export",
                 )
 
         col_t3, col_t4 = st.columns(2)
@@ -607,6 +630,7 @@ if run_button or st.session_state.analysis_done:
                 "Matched genes (CSV)",
                 bactrap_matched.to_csv(index=False).encode(),
                 "matched_genes.csv", "text/csv",
+                key="dl_matched_csv",
             )
         with col_t4:
             if len(enriched_df) > 0:
@@ -614,6 +638,7 @@ if run_button or st.session_state.analysis_done:
                     "Enriched genes (CSV)",
                     enriched_df.to_csv(index=False).encode(),
                     "enriched_genes.csv", "text/csv",
+                    key="dl_enriched_csv",
                 )
 
         if not zscore_df.empty:
@@ -621,6 +646,7 @@ if run_button or st.session_state.analysis_done:
                 "Z-score heatmap data (CSV)",
                 zscore_df.to_csv().encode(),
                 "zscore_heatmap.csv", "text/csv",
+                key="dl_zscore_csv",
             )
 
 else:

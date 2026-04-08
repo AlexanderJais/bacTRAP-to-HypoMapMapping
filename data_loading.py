@@ -98,11 +98,61 @@ def match_genes(
             matched_gene_names.append(original_name)
             gene_to_adata_idx[original_name] = adata_idx
 
+    if len(matched_rows) == 0:
+        empty_df = bactrap_df.iloc[:0].copy()
+        empty_df["_hypomap_gene_name"] = pd.Series(dtype=str)
+        return empty_df, [], {}
+
     bactrap_matched = pd.DataFrame(matched_rows)
     bactrap_matched = bactrap_matched.reset_index(drop=True)
     bactrap_matched["_hypomap_gene_name"] = matched_gene_names
 
     return bactrap_matched, matched_gene_names, gene_to_adata_idx
+
+
+def _resolve_gene_names(adata: ad.AnnData, gene_indices: np.ndarray) -> List[str]:
+    """Resolve gene indices to display names, consistent with match_genes()."""
+    adata_gene_names = get_gene_names_from_adata(adata)
+    return [str(adata_gene_names[i]) for i in gene_indices]
+
+
+def _extract_gene_submatrix(
+    adata: ad.AnnData,
+    gene_indices: np.ndarray,
+    use_raw: bool = True,
+) -> np.ndarray:
+    """
+    Extract a dense (n_cells, n_genes) submatrix for the given gene indices.
+
+    Processes in column chunks to avoid materializing the full sparse matrix.
+    """
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+    else:
+        X = adata.X
+
+    n_cells = X.shape[0]
+    n_genes = len(gene_indices)
+
+    # For small gene sets, direct column slicing is fine
+    if n_genes <= 500:
+        X_sub = X[:, gene_indices]
+        if sparse.issparse(X_sub):
+            return np.asarray(X_sub.toarray())
+        return np.asarray(X_sub)
+
+    # For larger sets, process in chunks to limit peak memory
+    chunk_size = 200
+    out = np.empty((n_cells, n_genes), dtype=np.float32)
+    for start in range(0, n_genes, chunk_size):
+        end = min(start + chunk_size, n_genes)
+        chunk_idx = gene_indices[start:end]
+        X_chunk = X[:, chunk_idx]
+        if sparse.issparse(X_chunk):
+            out[:, start:end] = np.asarray(X_chunk.toarray())
+        else:
+            out[:, start:end] = np.asarray(X_chunk)
+    return out
 
 
 def compute_cluster_mean_expression(
@@ -117,48 +167,21 @@ def compute_cluster_mean_expression(
 
     Returns a DataFrame with shape (n_genes, n_clusters).
     """
-    # Select expression source
-    if use_raw and adata.raw is not None:
-        X = adata.raw.X
-        var_names = adata.raw.var_names
-    else:
-        X = adata.X
-        var_names = adata.var_names
-
     gene_indices_arr = np.array(gene_indices)
     labels = adata.obs[annotation_col].values
 
-    # Get unique clusters meeting minimum cell count
     unique_labels, counts = np.unique(labels, return_counts=True)
-    valid_mask = counts >= min_cells
-    valid_labels = unique_labels[valid_mask]
+    valid_labels = unique_labels[counts >= min_cells]
 
-    # Extract submatrix for genes of interest
-    X_genes = X[:, gene_indices_arr]
-    if sparse.issparse(X_genes):
-        X_genes_dense = np.asarray(X_genes.todense())
-    else:
-        X_genes_dense = np.asarray(X_genes)
+    X_genes = _extract_gene_submatrix(adata, gene_indices_arr, use_raw=use_raw)
 
-    # Compute means per cluster
     result = {}
     for label in valid_labels:
         mask = labels == label
-        cluster_expr = X_genes_dense[mask, :]
-        result[str(label)] = cluster_expr.mean(axis=0)
+        result[str(label)] = X_genes[mask, :].mean(axis=0)
 
-    gene_names_for_idx = []
-    raw_var_names = adata.raw.var_names if (use_raw and adata.raw is not None) else adata.var_names
-    adata_gene_names = get_gene_names_from_adata(adata)
-    # Use the same gene names we used for matching
-    for idx in gene_indices_arr:
-        if idx < len(adata_gene_names):
-            gene_names_for_idx.append(str(adata_gene_names[idx]))
-        else:
-            gene_names_for_idx.append(str(raw_var_names[idx]))
-
-    df = pd.DataFrame(result, index=gene_names_for_idx)
-    return df
+    gene_names = _resolve_gene_names(adata, gene_indices_arr)
+    return pd.DataFrame(result, index=gene_names)
 
 
 def compute_fraction_expressing(
@@ -174,35 +197,21 @@ def compute_fraction_expressing(
 
     Returns a DataFrame with shape (n_genes, n_clusters).
     """
-    if use_raw and adata.raw is not None:
-        X = adata.raw.X
-    else:
-        X = adata.X
-
     gene_indices_arr = np.array(gene_indices)
     labels = adata.obs[annotation_col].values
 
     unique_labels, counts = np.unique(labels, return_counts=True)
-    valid_mask = counts >= min_cells
-    valid_labels = unique_labels[valid_mask]
+    valid_labels = unique_labels[counts >= min_cells]
 
-    X_genes = X[:, gene_indices_arr]
-    if sparse.issparse(X_genes):
-        X_genes_dense = np.asarray(X_genes.todense())
-    else:
-        X_genes_dense = np.asarray(X_genes)
+    X_genes = _extract_gene_submatrix(adata, gene_indices_arr, use_raw=use_raw)
 
     result = {}
     for label in valid_labels:
         mask = labels == label
-        cluster_expr = X_genes_dense[mask, :]
-        result[str(label)] = (cluster_expr > threshold).mean(axis=0)
+        result[str(label)] = (X_genes[mask, :] > threshold).mean(axis=0)
 
-    adata_gene_names = get_gene_names_from_adata(adata)
-    gene_names_for_idx = [str(adata_gene_names[i]) for i in gene_indices_arr]
-
-    df = pd.DataFrame(result, index=gene_names_for_idx)
-    return df
+    gene_names = _resolve_gene_names(adata, gene_indices_arr)
+    return pd.DataFrame(result, index=gene_names)
 
 
 def subsample_adata(adata: ad.AnnData, n_cells: int = 50000, seed: int = 42) -> ad.AnnData:
