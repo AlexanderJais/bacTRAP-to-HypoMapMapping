@@ -977,6 +977,9 @@ if run_button or st.session_state.analysis_done:
                 for name, fmt_dict in cached_bytes.items():
                     zf.writestr(f"{name}.pdf", fmt_dict["pdf"])
                     zf.writestr(f"{name}.svg", fmt_dict["svg"])
+                # Include log file
+                if _LOG_FILE.is_file():
+                    zf.writestr("bactrap_hypomap.log", _LOG_FILE.read_text(errors="replace"))
             buf.seek(0)
 
             st.download_button(
@@ -1060,6 +1063,19 @@ if run_button or st.session_state.analysis_done:
                 "composite_ranking.csv", "text/csv",
                 key="dl_composite_csv_export",
             )
+
+        st.markdown("---")
+        st.subheader("Diagnostics")
+        if _LOG_FILE.is_file():
+            st.download_button(
+                "Download log file",
+                _LOG_FILE.read_text(errors="replace").encode(),
+                "bactrap_hypomap.log", "text/plain",
+                use_container_width=True,
+                key="dl_log_file",
+            )
+        else:
+            st.info("No log file generated yet.")
 
 else:
     st.info("Click **Run Analysis** in the sidebar to start.")
