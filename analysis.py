@@ -6,6 +6,7 @@ UMAP enrichment scoring, marker gene computation, NNLS deconvolution,
 GSEA-style enrichment, and AUCell scoring.
 """
 
+import logging
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -13,6 +14,8 @@ from scipy import stats, sparse
 from scipy.optimize import nnls
 from typing import Tuple, List, Dict, Optional
 import warnings
+
+logger = logging.getLogger(__name__)
 
 from data_loading import (
     compute_cluster_mean_expression,
@@ -41,12 +44,16 @@ def compute_enrichment_correlation(
         DataFrame with columns: cluster, pearson_r, pearson_pval,
         spearman_r, spearman_pval, sorted by spearman_r descending.
     """
+    logger.info("compute_enrichment_correlation: %d bacTRAP genes, %d expr genes, %d clusters",
+                len(bactrap_matched), len(cluster_mean_expr), len(cluster_mean_expr.columns))
     # Align genes between bacTRAP and cluster expression
     bt_genes = bactrap_matched["_hypomap_gene_name"].values
     expr_genes = cluster_mean_expr.index.values
     common = np.intersect1d(bt_genes, expr_genes)
+    logger.info("  common genes: %d", len(common))
 
     if len(common) < 3:
+        logger.warning("  <3 common genes — skipping correlation")
         return pd.DataFrame(columns=[
             "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
             "n_genes",
@@ -68,10 +75,14 @@ def compute_enrichment_correlation(
 
     # Remove genes with NaN enrichment values (e.g. NaN log2FoldChange)
     valid_mask = np.isfinite(enrichment)
-    if not np.all(valid_mask):
+    n_nan = int((~valid_mask).sum())
+    if n_nan > 0:
+        logger.info("  removed %d genes with NaN enrichment values", n_nan)
         enrichment = enrichment[valid_mask]
         expr_sub = expr_sub[valid_mask]
+    logger.info("  genes for correlation: %d, clusters: %d", len(enrichment), len(expr_sub.columns))
     if len(enrichment) < 3:
+        logger.warning("  <3 valid genes after NaN removal — skipping correlation")
         return pd.DataFrame(columns=[
             "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
             "n_genes",
@@ -102,6 +113,10 @@ def compute_enrichment_correlation(
     df = pd.DataFrame(results)
     if len(df) > 0:
         df = df.sort_values("spearman_r", ascending=False).reset_index(drop=True)
+        logger.info("  correlation result: %d clusters, top spearman_r=%.4f (%s)",
+                    len(df), df["spearman_r"].iloc[0], df["cluster"].iloc[0])
+    else:
+        logger.warning("  correlation result: 0 clusters (all had zero variance)")
     return df
 
 
@@ -121,11 +136,19 @@ def get_enriched_genes(
                 f"Required column '{required_col}' not found in bacTRAP data. "
                 f"Available columns: {list(bactrap_df.columns)}"
             )
+    n_total = len(bactrap_df)
+    has_padj = bactrap_df["padj"].notna().sum()
+    passes_padj = (bactrap_df["padj"] < padj_cutoff).sum()
+    passes_fc = (bactrap_df["log2FoldChange"] > log2fc_cutoff).sum()
     mask = (
         (bactrap_df["padj"].notna())
         & (bactrap_df["padj"] < padj_cutoff)
         & (bactrap_df["log2FoldChange"] > log2fc_cutoff)
     )
+    n_enriched = mask.sum()
+    logger.info("get_enriched_genes: %d total, %d with padj, %d pass padj<%.3f, "
+                "%d pass log2FC>%.2f, %d pass both",
+                n_total, has_padj, passes_padj, padj_cutoff, passes_fc, log2fc_cutoff, n_enriched)
     return bactrap_df[mask].copy()
 
 
@@ -137,11 +160,15 @@ def compute_marker_genes(
 
     Returns dict mapping cluster name to list of marker gene names.
     """
+    logger.info("compute_marker_genes: annotation_col=%s, n_genes=%d, min_cells=%d",
+                annotation_col, n_genes, min_cells)
     # Filter to clusters with enough cells
     cluster_counts = adata.obs[annotation_col].value_counts()
     valid_clusters = cluster_counts[cluster_counts >= min_cells].index.tolist()
+    logger.info("  %d/%d clusters pass min_cells=%d", len(valid_clusters), len(cluster_counts), min_cells)
 
     if len(valid_clusters) == 0:
+        logger.warning("  no clusters pass min_cells filter — returning empty markers")
         return {}
 
     adata_sub = adata[adata.obs[annotation_col].isin(valid_clusters)].copy()
@@ -167,8 +194,11 @@ def compute_marker_genes(
     else:
         sample_max = np.max(X_sample)
     if sample_max > 50:
+        logger.info("  sample_max=%.1f > 50 — applying normalize_total + log1p", float(sample_max))
         sc.pp.normalize_total(adata_work, target_sum=1e4)
         sc.pp.log1p(adata_work)
+    else:
+        logger.info("  sample_max=%.1f <= 50 — data appears already normalized", float(sample_max))
 
     sc.tl.rank_genes_groups(
         adata_work,
@@ -187,6 +217,7 @@ def compute_marker_genes(
         varname_to_symbol[str(vn)] = str(gn)
 
     markers = {}
+    n_failed = 0
     for cluster in valid_clusters:
         try:
             raw_names = sc.get.rank_genes_groups_df(
@@ -197,8 +228,10 @@ def compute_marker_genes(
                 varname_to_symbol.get(g, g) for g in raw_names
             ]
         except Exception:
+            n_failed += 1
             continue
 
+    logger.info("  marker genes computed for %d clusters (%d failed)", len(markers), n_failed)
     return markers
 
 
@@ -210,7 +243,9 @@ def load_precomputed_markers(adata) -> Optional[Dict[str, List[str]]]:
     downstream comparisons (Fisher's, GSEA) work correctly against
     symbol-based enriched-gene lists.
     """
+    logger.info("load_precomputed_markers: checking adata.uns for rank_genes_groups")
     if "rank_genes_groups" not in adata.uns:
+        logger.info("  not found in adata.uns")
         return None
     try:
         groups = adata.uns["rank_genes_groups"]["names"].dtype.names
@@ -218,7 +253,10 @@ def load_precomputed_markers(adata) -> Optional[Dict[str, List[str]]]:
         for group in groups:
             genes = adata.uns["rank_genes_groups"]["names"][group].tolist()
             markers[str(group)] = [str(g) for g in genes]
-    except Exception:
+        logger.info("  loaded %d groups, %d genes/group (first group)", len(markers),
+                    len(next(iter(markers.values()))) if markers else 0)
+    except Exception as e:
+        logger.warning("  failed to parse rank_genes_groups: %s", e)
         return None
 
     # ---- Ensembl → symbol conversion if needed ----
@@ -228,6 +266,7 @@ def load_precomputed_markers(adata) -> Optional[Dict[str, List[str]]]:
         if len(sample_genes) >= 10:
             break
     if any(str(g).startswith(("ENSMUSG", "ENSG")) for g in sample_genes):
+        logger.info("  marker genes appear to be Ensembl IDs — converting to symbols")
         # Build lookup from var (and raw.var if available)
         ensembl_to_symbol: Dict[str, str] = {}
         for source_var in ([adata.raw.var] if adata.raw is not None else []) + [adata.var]:
@@ -239,10 +278,15 @@ def load_precomputed_markers(adata) -> Optional[Dict[str, List[str]]]:
                         ensembl_to_symbol[str(ens_id)] = sym_str
 
         if ensembl_to_symbol:
+            logger.info("  Ensembl→symbol map: %d entries", len(ensembl_to_symbol))
             markers = {
                 cluster: [ensembl_to_symbol.get(g, g) for g in genes]
                 for cluster, genes in markers.items()
             }
+        else:
+            logger.warning("  no symbol mapping found — markers remain as Ensembl IDs")
+    else:
+        logger.info("  marker genes are already symbols")
 
     return markers
 
@@ -265,7 +309,10 @@ def fisher_overlap_test(
         DataFrame with columns: cluster, overlap_count, overlap_genes,
         odds_ratio, pvalue, neg_log10_pval, sorted by pvalue.
     """
+    logger.info("fisher_overlap_test: %d enriched genes, %d clusters, universe=%d",
+                len(enriched_genes), len(cluster_markers), universe_size)
     if len(enriched_genes) == 0 or len(cluster_markers) == 0:
+        logger.warning("  empty input — returning empty results")
         return pd.DataFrame(columns=[
             "cluster", "overlap_count", "n_enriched", "n_markers",
             "overlap_genes", "odds_ratio", "pvalue", "neg_log10_pval",
@@ -315,6 +362,8 @@ def fisher_overlap_test(
         _, padj, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
         df["padj"] = padj
         df = df.sort_values("pvalue").reset_index(drop=True)
+        n_sig = (df["padj"] < 0.05).sum()
+        logger.info("  Fisher result: %d clusters tested, %d significant (padj<0.05)", len(df), n_sig)
     return df
 
 
@@ -353,7 +402,10 @@ def compute_enrichment_score(
         if g_lower in gene_lower_to_idx:
             gene_idx.append(gene_lower_to_idx[g_lower])
 
+    logger.info("compute_enrichment_score: %d/%d genes found in atlas, %d cells",
+                len(gene_idx), len(gene_names), adata.n_obs)
     if len(gene_idx) == 0:
+        logger.warning("  no genes found — returning zero scores")
         return np.zeros(adata.n_obs)
 
     X_sub = X[:, gene_idx]
@@ -427,12 +479,16 @@ def compute_nnls_deconvolution(
         DataFrame with columns: cluster, weight, weight_norm (0–1 scaled),
         sorted by weight descending.
     """
+    logger.info("compute_nnls_deconvolution: %d bacTRAP genes, %d expr genes, %d clusters",
+                len(bactrap_matched), len(cluster_mean_expr), len(cluster_mean_expr.columns))
     bt_dedup = bactrap_matched.drop_duplicates(subset="_hypomap_gene_name", keep="first")
     bt_genes = bt_dedup["_hypomap_gene_name"].values
     expr_genes = cluster_mean_expr.index.values
     common = np.intersect1d(bt_genes, expr_genes)
+    logger.info("  common genes: %d", len(common))
 
     if len(common) < 5:
+        logger.warning("  <5 common genes — skipping NNLS")
         return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
 
     bt_lookup = dict(zip(bt_dedup["_hypomap_gene_name"], bt_dedup[enrichment_col]))
@@ -453,7 +509,11 @@ def compute_nnls_deconvolution(
     A = expr_sub.values.astype(float)  # (genes, clusters)
     b = enrichment.astype(float)
 
+    logger.info("  NNLS input: A=%s, b=%s", A.shape, b.shape)
     w, residual = nnls(A, b)
+    n_nonzero = int((w > 0).sum())
+    logger.info("  NNLS result: residual=%.4f, %d/%d clusters with nonzero weight, max_weight=%.4f",
+                residual, n_nonzero, len(w), float(w.max()) if len(w) > 0 else 0)
 
     clusters = expr_sub.columns.tolist()
     df = pd.DataFrame({
@@ -545,7 +605,10 @@ def compute_gsea_enrichment(
         {},
         np.array([]),
     )
+    logger.info("compute_gsea_enrichment: %d genes, %d clusters, n_perm=%d",
+                len(bactrap_matched), len(cluster_markers), n_perm)
     if len(bactrap_matched) == 0 or len(cluster_markers) == 0:
+        logger.warning("  empty input — returning empty GSEA results")
         return empty_result
 
     # Rank genes by enrichment (descending)
@@ -555,6 +618,8 @@ def compute_gsea_enrichment(
     ranked_genes = df_sorted["_hypomap_gene_name"].values
     enrichment_vals = df_sorted[enrichment_col].values.astype(float)
     abs_enrichment = np.abs(enrichment_vals)
+    logger.info("  ranked %d genes (after dropna), FC range: [%.2f, %.2f]",
+                len(ranked_genes), float(enrichment_vals[-1]), float(enrichment_vals[0]))
 
     N = len(ranked_genes)
     # Pre-compute lowercase names once (avoids repeated .lower() in loops)
@@ -607,6 +672,11 @@ def compute_gsea_enrichment(
         _, padj, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
         df["padj"] = padj
         df = df.sort_values("NES", ascending=False).reset_index(drop=True)
+        n_sig = (df["padj"] < 0.05).sum()
+        logger.info("  GSEA result: %d clusters, %d significant (padj<0.05), top NES=%.2f (%s)",
+                    len(df), n_sig, df["NES"].iloc[0], df["cluster"].iloc[0])
+    else:
+        logger.warning("  GSEA result: 0 clusters")
 
     return df, running_scores_dict, ranked_genes
 
@@ -663,7 +733,10 @@ def compute_aucell_scores(
     n_total_genes = X.shape[1]
     n_query = len(query_idx)
 
+    logger.info("compute_aucell_scores: %d/%d genes found, %d cells, top_fraction=%.2f",
+                n_query, len(gene_names), n_cells, top_fraction)
     if n_query == 0:
+        logger.warning("  no genes found — returning zero AUCell scores")
         return np.zeros(n_cells)
 
     # Boolean mask for query genes (vectorized membership test)
@@ -705,6 +778,8 @@ def compute_aucell_scores(
             auc = cumhits.sum()
             scores[start + i] = auc / max_auc if max_auc > 0 else 0.0
 
+    logger.info("  AUCell scores: mean=%.4f, std=%.4f, min=%.4f, max=%.4f",
+                float(scores.mean()), float(scores.std()), float(scores.min()), float(scores.max()))
     return scores
 
 

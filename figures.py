@@ -12,6 +12,7 @@ All figures follow Nature journal specifications:
 """
 
 import io
+import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -21,6 +22,8 @@ import seaborn as sns
 from scipy.cluster.hierarchy import linkage, leaves_list
 from adjustText import adjust_text
 from typing import Optional, List, Dict
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +172,9 @@ def figure_umap_enrichment(
     subsample_idx: Optional[np.ndarray] = None,
     max_legend_items: int = 20,
 ) -> plt.Figure:
+    logger.info("figure_umap_enrichment: %d cells, %d unique labels, subsample=%s",
+                len(umap_coords), len(np.unique(cell_labels)),
+                len(subsample_idx) if subsample_idx is not None else "none")
     """
     Two-panel UMAP: left colored by cell-type annotation, right by enrichment score.
     """
@@ -277,6 +283,9 @@ def figure_dotplot(
     top_clusters: List[str],
     double_column: bool = True,
 ) -> plt.Figure:
+    logger.info("figure_dotplot: %d genes requested, %d clusters requested, "
+                "mean_expr=%s, frac_expr=%s",
+                len(top_genes), len(top_clusters), mean_expr.shape, frac_expr.shape)
     """
     Dot plot: dot size = fraction expressing, dot color = mean expression.
     Rows = genes, columns = clusters.
@@ -285,14 +294,20 @@ def figure_dotplot(
 
     genes = [g for g in top_genes if g in mean_expr.index and g in frac_expr.index]
     clusters = [c for c in top_clusters if c in mean_expr.columns and c in frac_expr.columns]
+    logger.info("  after filtering: %d/%d genes, %d/%d clusters available",
+                len(genes), len(top_genes), len(clusters), len(top_clusters))
 
     if len(genes) == 0 or len(clusters) == 0:
+        logger.warning("  no genes or clusters available — empty dotplot")
         fig, ax = plt.subplots(figsize=(3.5, 2))
         ax.text(0.5, 0.5, "No data available", ha="center", va="center")
         return fig
 
     mean_sub = mean_expr.loc[genes, clusters]
     frac_sub = frac_expr.loc[genes, clusters]
+    logger.info("  frac_expr range: [%.3f, %.3f], mean_expr range: [%.3f, %.3f]",
+                float(frac_sub.values.min()), float(frac_sub.values.max()),
+                float(mean_sub.values.min()), float(mean_sub.values.max()))
 
     n_genes = len(genes)
     n_clusters = len(clusters)
@@ -473,7 +488,10 @@ def figure_bactrap_volcano(
         return fig
 
     df = bactrap_matched.copy()
+    n_before = len(df)
     df = df.dropna(subset=["log2FoldChange", "padj"])
+    logger.info("figure_bactrap_volcano: %d genes (%d dropped for NaN), highlight=%s",
+                len(df), n_before - len(df), highlight_genes)
     df["neg_log10_padj"] = -np.log10(df["padj"].clip(lower=1e-300))
     df["neg_log10_padj"] = df["neg_log10_padj"].clip(upper=50)
 
@@ -481,6 +499,7 @@ def figure_bactrap_volcano(
     sig_up = (df["padj"] < padj_cutoff) & (df["log2FoldChange"] > log2fc_cutoff)
     sig_down = (df["padj"] < padj_cutoff) & (df["log2FoldChange"] < -log2fc_cutoff)
     nonsig = ~sig_up & ~sig_down
+    logger.info("  sig_up=%d, sig_down=%d, nonsig=%d", sig_up.sum(), sig_down.sum(), nonsig.sum())
 
     # Plot non-significant
     ax.scatter(
