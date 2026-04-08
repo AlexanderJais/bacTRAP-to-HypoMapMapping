@@ -177,12 +177,18 @@ if len(ann_cols) == 0:
     st.stop()
 
 default_idx = 0
-# Try to find a reasonable default
-for i, col in enumerate(ann_cols):
-    col_lower = col.lower()
-    if "cell_type" in col_lower or "celltype" in col_lower or "cluster" in col_lower:
-        default_idx = i
+# Prefer C185_named (best resolution for bacTRAP mapping), then C66_named
+for preferred in ["C185_named", "C66_named"]:
+    if preferred in ann_cols:
+        default_idx = ann_cols.index(preferred)
         break
+else:
+    # Fallback: look for any cell_type or cluster column
+    for i, col in enumerate(ann_cols):
+        col_lower = col.lower()
+        if "cell_type" in col_lower or "celltype" in col_lower or "cluster" in col_lower:
+            default_idx = i
+            break
 
 annotation_col = st.sidebar.selectbox(
     "Annotation column",
