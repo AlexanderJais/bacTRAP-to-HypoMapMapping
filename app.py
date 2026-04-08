@@ -31,6 +31,9 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+# Suppress noisy third-party loggers
+logging.getLogger("fontTools").setLevel(logging.WARNING)
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
 logger.info("="*60)
 logger.info("App startup / Streamlit rerun")
 

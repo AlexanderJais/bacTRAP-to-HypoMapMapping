@@ -617,8 +617,9 @@ def figure_gsea_curves(
     ax.set_xlabel("Gene rank (by bacTRAP enrichment)")
     ax.set_ylabel("Running enrichment score")
     ax.set_title("GSEA: cluster marker enrichment in bacTRAP-ranked genes")
-    ax.legend(fontsize=5, frameon=False, loc="upper right")
+    ax.legend(fontsize=5, frameon=False, loc="center left", bbox_to_anchor=(1.02, 0.5))
     ax.set_xlim(0, n_genes)
+    fig.subplots_adjust(right=0.7)
 
     return fig
 
