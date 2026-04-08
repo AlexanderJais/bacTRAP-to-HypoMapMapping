@@ -189,18 +189,49 @@ def compute_marker_genes(
 
 
 def load_precomputed_markers(adata) -> Optional[Dict[str, List[str]]]:
-    """Try to load pre-computed marker genes from adata.uns."""
-    if "rank_genes_groups" in adata.uns:
-        try:
-            groups = adata.uns["rank_genes_groups"]["names"].dtype.names
-            markers = {}
-            for group in groups:
-                genes = adata.uns["rank_genes_groups"]["names"][group].tolist()
-                markers[str(group)] = [str(g) for g in genes]
-            return markers
-        except Exception:
-            return None
-    return None
+    """Try to load pre-computed marker genes from adata.uns.
+
+    If the stored gene names look like Ensembl IDs, they are converted to
+    gene symbols using ``adata.var`` (or ``adata.raw.var``) metadata so that
+    downstream comparisons (Fisher's, GSEA) work correctly against
+    symbol-based enriched-gene lists.
+    """
+    if "rank_genes_groups" not in adata.uns:
+        return None
+    try:
+        groups = adata.uns["rank_genes_groups"]["names"].dtype.names
+        markers = {}
+        for group in groups:
+            genes = adata.uns["rank_genes_groups"]["names"][group].tolist()
+            markers[str(group)] = [str(g) for g in genes]
+    except Exception:
+        return None
+
+    # ---- Ensembl → symbol conversion if needed ----
+    sample_genes = []
+    for glist in markers.values():
+        sample_genes.extend(glist[:5])
+        if len(sample_genes) >= 10:
+            break
+    if any(str(g).startswith("ENSMUSG") for g in sample_genes):
+        # Build lookup from var (and raw.var if available)
+        ensembl_to_symbol: Dict[str, str] = {}
+        for source_var in ([adata.raw.var] if adata.raw is not None else []) + [adata.var]:
+            for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
+                if col in source_var.columns:
+                    for ens_id, sym in zip(source_var.index, source_var[col]):
+                        sym_str = str(sym).strip()
+                        if sym_str and sym_str.lower() != "nan":
+                            ensembl_to_symbol[str(ens_id)] = sym_str
+                    break  # use first available column from this source
+
+        if ensembl_to_symbol:
+            markers = {
+                cluster: [ensembl_to_symbol.get(g, g) for g in genes]
+                for cluster, genes in markers.items()
+            }
+
+    return markers
 
 
 def fisher_overlap_test(
@@ -281,56 +312,37 @@ def compute_enrichment_score(
     use_raw: bool = True,
 ) -> np.ndarray:
     """
-    Compute a bacTRAP enrichment score for each cell using scanpy's score_genes.
+    Compute a bacTRAP enrichment score for each cell.
 
     This is a z-scored mean expression of the given gene set across all cells.
+    Gene lookup uses the **raw** layer when available so that all genes (not
+    just the HVG-filtered subset in ``adata.var``) are considered.
     """
-    # Find which genes are present in adata
-    adata_genes = get_gene_names_from_adata(adata)
-    adata_genes_lower = {str(g).lower(): str(g) for g in adata_genes}
-
-    present_genes = []
-    for g in gene_names:
-        g_lower = str(g).lower()
-        if g_lower in adata_genes_lower:
-            present_genes.append(adata_genes_lower[g_lower])
-
-    if len(present_genes) == 0:
-        return np.zeros(adata.n_obs)
-
-    # Use var_names as they appear in the adata
-    var_names_list = list(adata.var_names)
-    adata_gene_names_arr = get_gene_names_from_adata(adata)
-
-    # Map gene names to var_names indices
-    gene_name_to_var = {}
-    for i, (vn, gn) in enumerate(zip(var_names_list, adata_gene_names_arr)):
-        gene_name_to_var[str(gn).lower()] = vn
-
-    score_gene_list = []
-    for g in present_genes:
-        g_lower = g.lower()
-        if g_lower in gene_name_to_var:
-            score_gene_list.append(gene_name_to_var[g_lower])
-
-    if len(score_gene_list) == 0:
-        return np.zeros(adata.n_obs)
-
-    # Manual z-scored mean — avoids adata.copy() which doubles memory for
-    # the full atlas. sc.tl.score_genes requires a copy and uses more RAM
-    # than we can afford with a ~3.9GB object.
-    # Build index lookup for the correct expression source (var vs raw.var)
+    # Determine expression source
     if use_raw and adata.raw is not None:
         X = adata.raw.X
-        source_var_names = list(adata.raw.var_names)
+        source_gene_names = get_gene_names_from_adata(adata, use_raw=True)
     else:
         X = adata.X
-        source_var_names = var_names_list
+        source_gene_names = get_gene_names_from_adata(adata)
 
-    source_var_to_idx = {vn: i for i, vn in enumerate(source_var_names)}
-    gene_idx = [source_var_to_idx[g] for g in score_gene_list if g in source_var_to_idx]
+    # Build case-insensitive lookup: gene symbol -> column index
+    gene_lower_to_idx = {}
+    for i, g in enumerate(source_gene_names):
+        key = str(g).strip().lower()
+        if key and key != "nan":
+            gene_lower_to_idx[key] = i
+
+    # Map input genes to expression matrix column indices
+    gene_idx = []
+    for g in gene_names:
+        g_lower = str(g).strip().lower()
+        if g_lower in gene_lower_to_idx:
+            gene_idx.append(gene_lower_to_idx[g_lower])
+
     if len(gene_idx) == 0:
         return np.zeros(adata.n_obs)
+
     X_sub = X[:, gene_idx]
     if sparse.issparse(X_sub):
         X_sub = np.asarray(X_sub.toarray())
@@ -444,63 +456,56 @@ def compute_nnls_deconvolution(
 # GSEA-style Preranked Enrichment
 # =========================================================================
 
-def _running_enrichment_score(
-    ranked_genes: np.ndarray,
-    gene_set: set,
-    weighted: bool = True,
-    enrichment_values: Optional[np.ndarray] = None,
+def _running_enrichment_score_vec(
+    hit_mask: np.ndarray,
+    abs_enrichment: np.ndarray,
 ) -> Tuple[float, np.ndarray]:
-    """
-    Compute a running enrichment score (Subramanian et al., PNAS 2005).
+    """Vectorised running enrichment score (Subramanian et al., PNAS 2005).
 
     Args:
-        ranked_genes: array of gene names sorted by enrichment metric
-        gene_set: set of gene names in the query set (lowercase)
-        weighted: if True, weight hits by their enrichment value
-        enrichment_values: array of enrichment values aligned with ranked_genes
+        hit_mask: boolean array — True where the ranked gene belongs to the set
+        abs_enrichment: absolute enrichment values aligned with the ranked list
 
     Returns:
-        (max_ES, running_scores) — peak enrichment score and running curve
+        (ES, running_scores) — peak enrichment score and the full running curve
     """
-    N = len(ranked_genes)
-    n_hit = sum(1 for g in ranked_genes if g.lower() in gene_set)
+    N = len(hit_mask)
+    n_hit = hit_mask.sum()
     n_miss = N - n_hit
 
     if n_hit == 0 or n_miss == 0:
         return 0.0, np.zeros(N)
 
-    # Compute hit weights
-    if weighted and enrichment_values is not None:
-        hit_weights = np.array([
-            abs(enrichment_values[i]) if ranked_genes[i].lower() in gene_set else 0.0
-            for i in range(N)
-        ])
-        weight_sum = hit_weights.sum()
-        if weight_sum == 0:
-            weight_sum = 1.0
-    else:
-        hit_weights = np.array([
-            1.0 if ranked_genes[i].lower() in gene_set else 0.0
-            for i in range(N)
-        ])
-        weight_sum = n_hit
+    hit_weights = np.where(hit_mask, abs_enrichment, 0.0)
+    weight_sum = hit_weights.sum()
+    if weight_sum == 0:
+        weight_sum = 1.0
 
     miss_penalty = 1.0 / n_miss
-    running = np.zeros(N)
-    score = 0.0
-    for i in range(N):
-        if ranked_genes[i].lower() in gene_set:
-            score += hit_weights[i] / weight_sum
-        else:
-            score -= miss_penalty
-        running[i] = score
+    increments = np.where(hit_mask, hit_weights / weight_sum, -miss_penalty)
+    running = np.cumsum(increments)
 
-    # ES = maximum deviation from zero
     max_pos = running.max()
     max_neg = running.min()
     es = max_pos if abs(max_pos) >= abs(max_neg) else max_neg
-
     return es, running
+
+
+def _es_from_mask(hit_mask: np.ndarray, abs_enrichment: np.ndarray) -> float:
+    """Fast ES computation (no running curve returned)."""
+    n_hit = hit_mask.sum()
+    n_miss = len(hit_mask) - n_hit
+    if n_hit == 0 or n_miss == 0:
+        return 0.0
+    hit_weights = np.where(hit_mask, abs_enrichment, 0.0)
+    weight_sum = hit_weights.sum()
+    if weight_sum == 0:
+        weight_sum = 1.0
+    increments = np.where(hit_mask, hit_weights / weight_sum, -1.0 / n_miss)
+    running = np.cumsum(increments)
+    max_pos = running.max()
+    max_neg = running.min()
+    return max_pos if abs(max_pos) >= abs(max_neg) else max_neg
 
 
 def compute_gsea_enrichment(
@@ -513,12 +518,12 @@ def compute_gsea_enrichment(
     Preranked GSEA: rank all matched genes by bacTRAP enrichment, then
     compute an enrichment score for each cluster's marker gene set.
 
-    This uses the full ranked list (not a hard cutoff), making it more
-    sensitive than Fisher's exact test.
+    Uses vectorised numpy operations for the running-score computation
+    and batch-generates all permutation indices up front, so the
+    185-cluster × 1 000-permutation workload stays tractable.
 
     Returns:
-        DataFrame with columns: cluster, ES, NES, pvalue, padj,
-        n_hits, running_scores, sorted by NES descending.
+        (DataFrame, running_scores_dict, ranked_genes)
     """
     empty_result = (
         pd.DataFrame(columns=["cluster", "ES", "NES", "pvalue", "padj", "n_hits"]),
@@ -534,40 +539,45 @@ def compute_gsea_enrichment(
     )
     ranked_genes = df_sorted["_hypomap_gene_name"].values
     enrichment_vals = df_sorted[enrichment_col].values.astype(float)
+    abs_enrichment = np.abs(enrichment_vals)
+
+    N = len(ranked_genes)
+    # Pre-compute lowercase names once (avoids repeated .lower() in loops)
+    ranked_lower = np.array([g.lower() for g in ranked_genes])
+
+    # Pre-generate all permutation indices at once
+    rng = np.random.default_rng(42)
+    perm_indices = np.empty((n_perm, N), dtype=np.intp)
+    for p in range(n_perm):
+        perm_indices[p] = rng.permutation(N)
 
     results = []
     running_scores_dict = {}
 
     for cluster, markers in cluster_markers.items():
         marker_set = set(g.lower() for g in markers)
-        es, running = _running_enrichment_score(
-            ranked_genes, marker_set,
-            weighted=True, enrichment_values=enrichment_vals,
-        )
+        # Boolean hit mask — vectorised membership test
+        hit_mask = np.array([g in marker_set for g in ranked_lower])
+        n_hits = int(hit_mask.sum())
 
-        # Permutation test: shuffle gene labels AND their enrichment values
-        # together so the null preserves the rank-value pairing but
-        # randomizes which genes are in the marker set.
-        null_es = np.zeros(n_perm)
-        rng = np.random.default_rng(42)
+        es, running = _running_enrichment_score_vec(hit_mask, abs_enrichment)
+        running_scores_dict[cluster] = running
+
+        # Permutation null — reuse pre-generated indices
+        null_es = np.empty(n_perm)
         for p in range(n_perm):
-            perm_idx = rng.permutation(len(ranked_genes))
-            null_es[p], _ = _running_enrichment_score(
-                ranked_genes[perm_idx], marker_set,
-                weighted=True, enrichment_values=enrichment_vals[perm_idx],
-            )
+            perm_idx = perm_indices[p]
+            null_es[p] = _es_from_mask(hit_mask[perm_idx], abs_enrichment[perm_idx])
 
-        # Compute p-value (one-sided for positive enrichment)
+        # p-value (one-sided)
         if es >= 0:
             pval = (np.sum(null_es >= es) + 1) / (n_perm + 1)
         else:
             pval = (np.sum(null_es <= es) + 1) / (n_perm + 1)
 
-        # NES = ES / mean of absolute null
         null_mean = np.mean(np.abs(null_es))
         nes = es / null_mean if null_mean > 0 else 0.0
 
-        n_hits = sum(1 for g in ranked_genes if g.lower() in marker_set)
         results.append({
             "cluster": cluster,
             "ES": es,
@@ -575,7 +585,6 @@ def compute_gsea_enrichment(
             "pvalue": pval,
             "n_hits": n_hits,
         })
-        running_scores_dict[cluster] = running
 
     df = pd.DataFrame(results)
     if len(df) > 0:
@@ -590,16 +599,6 @@ def compute_gsea_enrichment(
 # =========================================================================
 # AUCell Scoring
 # =========================================================================
-
-def _get_raw_gene_names(adata) -> np.ndarray:
-    """Extract gene names from adata.raw, handling Ensembl→symbol lookup."""
-    raw_var_names = np.array(adata.raw.var_names)
-    if len(raw_var_names) > 0 and str(raw_var_names[0]).startswith("ENSMUSG"):
-        for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
-            if col in adata.raw.var.columns:
-                return adata.raw.var[col].values.copy()
-    return raw_var_names
-
 
 def compute_aucell_scores(
     adata,
@@ -631,7 +630,7 @@ def compute_aucell_scores(
     # Determine expression source and build gene name lookup
     if use_raw and adata.raw is not None:
         X = adata.raw.X
-        source_gene_names = _get_raw_gene_names(adata)
+        source_gene_names = get_gene_names_from_adata(adata, use_raw=True)
     else:
         X = adata.X
         source_gene_names = get_gene_names_from_adata(adata)
