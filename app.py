@@ -136,6 +136,9 @@ from data_loading import (
     compute_cluster_mean_expression,
     compute_fraction_expressing,
     get_gene_names_from_adata,
+    _detect_gene_column,
+    _build_adata_gene_lookup,
+    _looks_like_ensembl,
 )
 from analysis import (
     compute_enrichment_correlation,
@@ -197,6 +200,48 @@ annotation_col = st.sidebar.selectbox(
     help="Select the cell-type annotation level from HypoMap .obs.",
 )
 
+# Gene column selection for bacTRAP data
+# Build HypoMap lookup once for auto-detection
+_adata_lookup, _adata_gnames, _adata_has_raw = _build_adata_gene_lookup(adata)
+auto_gene_col = _detect_gene_column(bactrap_df)
+
+# Build candidate list: auto-detected first, then other string/object columns + index
+_gene_col_candidates = []
+if auto_gene_col != "_index" and auto_gene_col in bactrap_df.columns:
+    _gene_col_candidates.append(auto_gene_col)
+for col in bactrap_df.columns:
+    if col not in _gene_col_candidates:
+        # Include string-like columns and columns with Ensembl-looking values
+        dtype = bactrap_df[col].dtype
+        if dtype == object or dtype.name in ("string", "category"):
+            _gene_col_candidates.append(col)
+_gene_col_candidates.append("(use row index)")
+
+_default_gene_idx = 0
+# Try auto-selecting the column with the best match count
+_best_matches = 0
+for i, col in enumerate(_gene_col_candidates):
+    if col == "(use row index)":
+        _vals = bactrap_df.index.astype(str)
+    else:
+        _vals = bactrap_df[col].astype(str)
+    _n = sum(1 for v in _vals if str(v).strip().lower() in _adata_lookup)
+    if _n > _best_matches:
+        _best_matches = _n
+        _default_gene_idx = i
+
+gene_col_selection = st.sidebar.selectbox(
+    "bacTRAP gene column",
+    _gene_col_candidates,
+    index=_default_gene_idx,
+    help=(
+        "Column in the bacTRAP file containing gene identifiers. "
+        "Auto-detected based on which column yields the most matches against HypoMap."
+    ),
+)
+# Map UI selection to the internal value expected by match_genes
+_gene_col_for_matching = "_index" if gene_col_selection == "(use row index)" else gene_col_selection
+
 # ---------------------------------------------------------------------------
 # Run analysis
 # ---------------------------------------------------------------------------
@@ -221,7 +266,9 @@ if run_button or st.session_state.analysis_done:
     # ---- Gene matching ----
     progress = progress_placeholder.progress(0, text="Matching genes...")
 
-    bactrap_matched, matched_genes, gene_to_idx, matched_in_raw = match_genes(bactrap_df, adata)
+    bactrap_matched, matched_genes, gene_to_idx, matched_in_raw = match_genes(
+        bactrap_df, adata, gene_col=_gene_col_for_matching,
+    )
 
     if len(matched_genes) == 0:
         progress.empty()
@@ -409,7 +456,28 @@ if run_button or st.session_state.analysis_done:
             match_pct = (len(matched_genes) / len(bactrap_df) * 100) if len(bactrap_df) > 0 else 0.0
             st.metric("Match rate", f"{match_pct:.1f}%")
 
-        st.subheader("Gene Matching Summary")
+        st.subheader("Gene Matching Diagnostics")
+
+        # Show which column was used and sample gene names from each dataset
+        diag_col1, diag_col2 = st.columns(2)
+        with diag_col1:
+            st.markdown(f"**bacTRAP gene column:** `{gene_col_selection}`")
+            if gene_col_selection == "(use row index)":
+                _sample_bt = [str(x) for x in bactrap_df.index[:10]]
+            else:
+                _sample_bt = bactrap_df[gene_col_selection].dropna().head(10).astype(str).tolist()
+            st.markdown("Sample bacTRAP gene IDs:")
+            st.code("\n".join(_sample_bt))
+        with diag_col2:
+            _sample_hm = [str(x) for x in _adata_gnames[:10]]
+            st.markdown(f"**HypoMap gene names** (resolved, n={len(_adata_gnames)}):")
+            st.code("\n".join(_sample_hm))
+            # Show raw var_names too if different
+            if _adata_has_raw and adata.raw is not None:
+                _raw_vn = [str(x) for x in adata.raw.var_names[:5]]
+                if _raw_vn != [str(x) for x in _adata_gnames[:5]]:
+                    st.markdown("Raw var_names (first 5):")
+                    st.code("\n".join(_raw_vn))
 
         # Bar chart of matched vs unmatched
         match_data = pd.DataFrame({
@@ -423,7 +491,7 @@ if run_button or st.session_state.analysis_done:
 
         st.subheader("Top Enriched Genes")
         if len(enriched_df) > 0:
-            display_cols = ["gene_name", "log2FoldChange", "padj", "IP", "Input"]
+            display_cols = ["_hypomap_gene_name", "log2FoldChange", "padj", "IP", "Input"]
             available_cols = [c for c in display_cols if c in enriched_df.columns]
             st.dataframe(
                 enriched_sorted[available_cols].head(30).reset_index(drop=True),

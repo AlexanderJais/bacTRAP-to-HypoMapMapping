@@ -49,11 +49,36 @@ def get_annotation_columns(adata: ad.AnnData) -> List[str]:
     return sorted(candidates)
 
 
+def _looks_like_ensembl(gene_names: np.ndarray, sample_size: int = 20) -> bool:
+    """Check whether gene names look like Ensembl IDs by sampling."""
+    if len(gene_names) == 0:
+        return False
+    sample = gene_names[:sample_size]
+    n_ens = sum(1 for g in sample if str(g).startswith(("ENSMUSG", "ENSG")))
+    return n_ens > len(sample) * 0.5
+
+
+def _find_symbol_column(var_df: pd.DataFrame) -> Optional[str]:
+    """Find a gene-symbol column in a var DataFrame."""
+    for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name",
+                "external_gene_name", "mgi_symbol", "feature_name"]:
+        if col in var_df.columns:
+            # Verify this column actually has non-Ensembl values
+            sample = var_df[col].dropna().head(20)
+            if len(sample) > 0 and not _looks_like_ensembl(sample.values):
+                return col
+    return None
+
+
 def get_gene_names_from_adata(adata: ad.AnnData, use_raw: bool = False) -> np.ndarray:
     """Extract gene names from the AnnData object, trying multiple locations.
 
     When *use_raw* is True and ``adata.raw`` exists, gene names are taken from
     the raw layer (which typically contains the full pre-HVG-filtering gene set).
+
+    If var_names look like Ensembl IDs, a gene-symbol column is searched in
+    both the target var DataFrame AND ``adata.var`` as fallback (since
+    ``adata.raw.var`` may lack annotation columns).
     """
     if use_raw and adata.raw is not None:
         gene_names = np.array(adata.raw.var_names)
@@ -63,22 +88,128 @@ def get_gene_names_from_adata(adata: ad.AnnData, use_raw: bool = False) -> np.nd
         var_df = adata.var
 
     # Check if var_names look like Ensembl IDs; if so, look for a symbol column
-    if len(gene_names) > 0 and str(gene_names[0]).startswith("ENSMUSG"):
-        for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
-            if col in var_df.columns:
-                gene_names = var_df[col].values.copy()
-                break
+    if _looks_like_ensembl(gene_names):
+        sym_col = _find_symbol_column(var_df)
+        if sym_col is not None:
+            gene_names = var_df[sym_col].values.copy()
+        elif use_raw and adata.raw is not None:
+            # Fallback: adata.var may have the symbol column even if raw.var doesn't.
+            # Build an Ensembl→symbol map from adata.var and translate.
+            sym_col_main = _find_symbol_column(adata.var)
+            if sym_col_main is not None:
+                ens_to_sym = {}
+                for ens_id, sym in zip(adata.var.index, adata.var[sym_col_main]):
+                    sym_str = str(sym).strip()
+                    if sym_str and sym_str.lower() != "nan":
+                        ens_to_sym[str(ens_id)] = sym_str
+                if ens_to_sym:
+                    gene_names = np.array([
+                        ens_to_sym.get(str(g), str(g)) for g in gene_names
+                    ])
 
     return gene_names
+
+
+def _detect_gene_column(bactrap_df: pd.DataFrame) -> str:
+    """Auto-detect the column in bacTRAP data that contains gene identifiers.
+
+    Checks common column names and the DataFrame index.  Returns the best
+    candidate column name (or ``"_index"`` if the index should be used).
+    """
+    # Priority-ordered list of likely gene-name column names
+    candidates = [
+        "gene_name", "gene_symbol", "symbol", "Gene", "GeneSymbol",
+        "gene_id", "GeneID", "external_gene_name", "mgi_symbol",
+        "SYMBOL", "gene_short_name", "feature_name", "Name",
+    ]
+    for col in candidates:
+        if col in bactrap_df.columns:
+            return col
+
+    # Check if first column looks like gene names (common in DESeq2 output)
+    first_col = bactrap_df.columns[0]
+    sample_vals = bactrap_df[first_col].dropna().head(20).astype(str)
+    if len(sample_vals) > 0:
+        # If most values are non-numeric strings, likely gene names
+        n_alpha = sum(1 for v in sample_vals if v and not v.replace(".", "").replace("-", "").replace("_", "").isdigit())
+        if n_alpha > len(sample_vals) * 0.5:
+            return first_col
+
+    # Check the index
+    if bactrap_df.index.dtype == object or bactrap_df.index.dtype.name == "string":
+        sample_idx = [str(x) for x in bactrap_df.index[:20]]
+        n_alpha = sum(1 for v in sample_idx if v and not v.replace(".", "").replace("-", "").replace("_", "").isdigit())
+        if n_alpha > len(sample_idx) * 0.5:
+            return "_index"
+
+    # Last resort: return first column
+    return first_col
+
+
+def _build_adata_gene_lookup(
+    adata: ad.AnnData, use_raw: bool = True,
+) -> Tuple[Dict[str, Tuple[str, int]], np.ndarray, bool]:
+    """Build a comprehensive gene lookup from an AnnData object.
+
+    Returns:
+        lookup: lowercase gene name -> (display_name, column_index)
+        gene_names: array of resolved gene names
+        is_raw: whether indices point into adata.raw.var
+    """
+    has_raw = adata.raw is not None and use_raw
+    gene_names = get_gene_names_from_adata(adata, use_raw=has_raw)
+
+    lookup: Dict[str, Tuple[str, int]] = {}
+    for idx, name in enumerate(gene_names):
+        name_str = str(name).strip()
+        key = name_str.lower()
+        if key and key != "nan":
+            lookup[key] = (name_str, idx)
+
+    # Also add Ensembl IDs as lookup keys (pointing to the same indices)
+    # so that bacTRAP data with Ensembl IDs can still match.
+    if has_raw and adata.raw is not None:
+        raw_var_names = np.array(adata.raw.var_names)
+    else:
+        raw_var_names = adata.var_names.values
+
+    if _looks_like_ensembl(raw_var_names):
+        # var_names are Ensembl IDs — already resolved gene_names to symbols above.
+        # Add the Ensembl IDs themselves as additional lookup keys.
+        for idx, ens_id in enumerate(raw_var_names):
+            ens_str = str(ens_id).strip().lower()
+            if ens_str and ens_str != "nan" and ens_str not in lookup:
+                # Use the resolved symbol as the display name
+                display = str(gene_names[idx]).strip()
+                if display and display.lower() != "nan":
+                    lookup[ens_str] = (display, idx)
+    elif not _looks_like_ensembl(gene_names):
+        # var_names are symbols — check if there's an Ensembl column we can
+        # add as additional keys (for bacTRAP files that use Ensembl IDs)
+        var_df = adata.raw.var if has_raw and adata.raw is not None else adata.var
+        for col in ["gene_ids", "gene_id", "ensembl_id", "Ensembl", "ensembl"]:
+            if col in var_df.columns:
+                for idx, ens_id in enumerate(var_df[col]):
+                    ens_str = str(ens_id).strip().lower()
+                    if ens_str and ens_str != "nan" and ens_str not in lookup:
+                        display = str(gene_names[idx]).strip()
+                        if display and display.lower() != "nan":
+                            lookup[ens_str] = (display, idx)
+                break
+
+    return lookup, gene_names, has_raw
 
 
 def match_genes(
     bactrap_df: pd.DataFrame,
     adata: ad.AnnData,
-    gene_col: str = "gene_name",
+    gene_col: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, List[str], Dict[str, int], bool]:
     """
-    Match bacTRAP gene symbols to HypoMap var_names.
+    Match bacTRAP gene identifiers to HypoMap genes.
+
+    When *gene_col* is None the column is auto-detected by trying common
+    column names and selecting the one that yields the most matches.
 
     When ``adata.raw`` exists the lookup is built from the **raw** layer so
     that *all* genes are available for matching (not just the highly-variable
@@ -92,33 +223,35 @@ def match_genes(
             otherwise in ``adata.var`` space.
         matched_in_raw: True when indices refer to adata.raw.var space.
     """
-    if gene_col not in bactrap_df.columns:
-        raise ValueError(f"Column '{gene_col}' not found in bacTRAP data.")
+    # Build the comprehensive HypoMap gene lookup once
+    adata_gene_lookup, adata_gene_names, has_raw = _build_adata_gene_lookup(adata)
 
-    # Match against the broadest available gene set (raw > var)
-    has_raw = adata.raw is not None
-    adata_gene_names = get_gene_names_from_adata(adata, use_raw=has_raw)
+    # Determine which bacTRAP column to use for gene matching
+    if gene_col is None:
+        gene_col = _auto_select_gene_col(bactrap_df, adata_gene_lookup)
 
-    # Build case-insensitive lookup: lowercase -> (original_name, index)
-    adata_gene_lookup = {}
-    for idx, name in enumerate(adata_gene_names):
-        name_str = str(name).strip()
-        key = name_str.lower()
-        if key and key != "nan":
-            adata_gene_lookup[key] = (name_str, idx)
+    if gene_col == "_index":
+        bt_gene_values = bactrap_df.index.astype(str)
+    elif gene_col in bactrap_df.columns:
+        bt_gene_values = bactrap_df[gene_col].astype(str)
+    else:
+        raise ValueError(
+            f"Column '{gene_col}' not found in bacTRAP data. "
+            f"Available columns: {list(bactrap_df.columns)}"
+        )
 
     # Match bacTRAP genes
     matched_rows = []
     matched_gene_names = []
     gene_to_adata_idx = {}
 
-    for _, row in bactrap_df.iterrows():
-        bt_gene = str(row[gene_col]).strip()
+    for i, bt_gene_raw in enumerate(bt_gene_values):
+        bt_gene = bt_gene_raw.strip()
         bt_gene_lower = bt_gene.lower()
 
         if bt_gene_lower in adata_gene_lookup:
             original_name, adata_idx = adata_gene_lookup[bt_gene_lower]
-            matched_rows.append(row)
+            matched_rows.append(bactrap_df.iloc[i])
             matched_gene_names.append(original_name)
             gene_to_adata_idx[original_name] = adata_idx
 
@@ -132,6 +265,46 @@ def match_genes(
     bactrap_matched["_hypomap_gene_name"] = matched_gene_names
 
     return bactrap_matched, matched_gene_names, gene_to_adata_idx, has_raw
+
+
+def _auto_select_gene_col(
+    bactrap_df: pd.DataFrame,
+    adata_gene_lookup: Dict[str, Tuple[str, int]],
+) -> str:
+    """Try multiple candidate columns and pick the one with the most matches."""
+    candidates = []
+
+    # Try known column names
+    for col in ["gene_name", "gene_symbol", "symbol", "Gene", "GeneSymbol",
+                "gene_id", "GeneID", "external_gene_name", "mgi_symbol",
+                "SYMBOL", "gene_short_name", "feature_name", "Name"]:
+        if col in bactrap_df.columns:
+            candidates.append(col)
+
+    # Also try the first column and the index
+    first_col = bactrap_df.columns[0]
+    if first_col not in candidates:
+        candidates.append(first_col)
+    candidates.append("_index")
+
+    best_col = candidates[0] if candidates else "_index"
+    best_count = 0
+
+    for col in candidates:
+        if col == "_index":
+            values = bactrap_df.index.astype(str)
+        else:
+            values = bactrap_df[col].astype(str)
+
+        n_matched = sum(
+            1 for v in values
+            if str(v).strip().lower() in adata_gene_lookup
+        )
+        if n_matched > best_count:
+            best_count = n_matched
+            best_col = col
+
+    return best_col
 
 
 def _resolve_gene_names(
@@ -181,7 +354,7 @@ def _map_var_indices_to_raw(
 
     # Second pass: if raw var_names are Ensembl IDs, add gene symbol entries.
     # Gene symbols take precedence (overwrite) since queries use symbols.
-    if len(raw_var_names) > 0 and str(raw_var_names[0]).startswith("ENSMUSG"):
+    if _looks_like_ensembl(np.array(raw_var_names)):
         for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
             if col in adata.raw.var.columns:
                 for i, name in enumerate(adata.raw.var[col]):

@@ -18,6 +18,8 @@ from data_loading import (
     compute_cluster_mean_expression,
     compute_fraction_expressing,
     get_gene_names_from_adata,
+    _looks_like_ensembl,
+    _find_symbol_column,
 )
 
 
@@ -213,17 +215,16 @@ def load_precomputed_markers(adata) -> Optional[Dict[str, List[str]]]:
         sample_genes.extend(glist[:5])
         if len(sample_genes) >= 10:
             break
-    if any(str(g).startswith("ENSMUSG") for g in sample_genes):
+    if any(str(g).startswith(("ENSMUSG", "ENSG")) for g in sample_genes):
         # Build lookup from var (and raw.var if available)
         ensembl_to_symbol: Dict[str, str] = {}
         for source_var in ([adata.raw.var] if adata.raw is not None else []) + [adata.var]:
-            for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
-                if col in source_var.columns:
-                    for ens_id, sym in zip(source_var.index, source_var[col]):
-                        sym_str = str(sym).strip()
-                        if sym_str and sym_str.lower() != "nan":
-                            ensembl_to_symbol[str(ens_id)] = sym_str
-                    break  # use first available column from this source
+            sym_col = _find_symbol_column(source_var)
+            if sym_col is not None:
+                for ens_id, sym in zip(source_var.index, source_var[sym_col]):
+                    sym_str = str(sym).strip()
+                    if sym_str and sym_str.lower() != "nan":
+                        ensembl_to_symbol[str(ens_id)] = sym_str
 
         if ensembl_to_symbol:
             markers = {
