@@ -49,6 +49,53 @@ def get_annotation_columns(adata: ad.AnnData) -> List[str]:
     return sorted(candidates)
 
 
+def get_cell_class_columns(adata: ad.AnnData) -> List[str]:
+    """Detect broad cell-class annotation columns suitable for filtering.
+
+    Looks for columns with a small number of categories (2-30) that likely
+    represent broad cell classes (e.g. Neurons, Astrocytes, ...).
+    Prioritises known HypoMap column names.
+    """
+    # Known HypoMap broad-class column names (priority order)
+    known = [
+        "Author_Class_Curated",
+        "Class",
+        "author_class_curated",
+        "class",
+        "C7_named",
+        "C7",
+    ]
+    found = [c for c in known if c in adata.obs.columns]
+
+    # Also scan for other low-cardinality categorical columns
+    for col in sorted(adata.obs.columns):
+        if col in found:
+            continue
+        dtype = adata.obs[col].dtype
+        if dtype.name == "category" or dtype == object:
+            nunique = adata.obs[col].nunique()
+            if 2 <= nunique <= 30:
+                found.append(col)
+
+    return found
+
+
+def get_neuronal_classes(class_values: List[str]) -> List[str]:
+    """From a list of cell-class names, return those that look neuronal."""
+    neuronal = []
+    for v in class_values:
+        v_lower = str(v).lower()
+        if "neuron" in v_lower or "neuron" in v_lower.replace("-", ""):
+            neuronal.append(v)
+    return neuronal
+
+
+def subset_adata(adata: ad.AnnData, column: str, keep_values: List[str]) -> ad.AnnData:
+    """Return an AnnData view filtered to rows where *column* is in *keep_values*."""
+    mask = adata.obs[column].isin(keep_values)
+    return adata[mask]
+
+
 def get_gene_names_from_adata(adata: ad.AnnData) -> np.ndarray:
     """Extract gene names from the AnnData object, trying multiple locations."""
     # First try var_names directly

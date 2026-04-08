@@ -132,6 +132,9 @@ from data_loading import (
     load_hypomap,
     load_bactrap,
     get_annotation_columns,
+    get_cell_class_columns,
+    get_neuronal_classes,
+    subset_adata,
     match_genes,
     compute_cluster_mean_expression,
     compute_fraction_expressing,
@@ -169,6 +172,62 @@ from figures import (
 with st.spinner("Loading data..."):
     bactrap_df = load_bactrap(bactrap_file.strip())
     adata = load_hypomap(hypomap_file.strip())
+
+# ------------------------------------------------------------------
+# Cell-class filter (e.g. restrict to Neurons only)
+# ------------------------------------------------------------------
+class_cols = get_cell_class_columns(adata)
+
+if class_cols:
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Cell Class Filter")
+
+    filter_col = st.sidebar.selectbox(
+        "Class column",
+        class_cols,
+        index=0,
+        help="Broad cell-class column used to filter cells before analysis.",
+    )
+    all_classes = sorted(adata.obs[filter_col].dropna().unique().astype(str).tolist())
+    neuronal_classes = get_neuronal_classes(all_classes)
+
+    filter_mode = st.sidebar.radio(
+        "Filter mode",
+        ["All cells", "Neurons only", "Custom selection"],
+        index=0,
+        help="'Neurons only' keeps neuronal cell classes; 'Custom' lets you pick.",
+    )
+
+    if filter_mode == "Neurons only":
+        if neuronal_classes:
+            selected_classes = neuronal_classes
+        else:
+            st.sidebar.warning(
+                f"No neuronal classes auto-detected in '{filter_col}'. "
+                "Falling back to all cells."
+            )
+            selected_classes = all_classes
+    elif filter_mode == "Custom selection":
+        selected_classes = st.sidebar.multiselect(
+            "Select cell classes to include",
+            all_classes,
+            default=all_classes,
+        )
+        if not selected_classes:
+            st.warning("No cell classes selected — using all cells.")
+            selected_classes = all_classes
+    else:
+        selected_classes = all_classes
+
+    # Apply filter if not keeping everything
+    if set(selected_classes) != set(all_classes):
+        adata = subset_adata(adata, filter_col, selected_classes)
+        st.sidebar.info(
+            f"Filtered to **{adata.n_obs:,}** cells "
+            f"({', '.join(selected_classes)})"
+        )
+
+st.sidebar.markdown("---")
 
 # Annotation column selection
 ann_cols = get_annotation_columns(adata)
