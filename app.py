@@ -99,23 +99,26 @@ st.caption(
     "murine HypoMap single-cell atlas to identify matching cell populations."
 )
 
-# Check file inputs
+# Check file inputs — must be existing files, not directories
+bt_path = Path(bactrap_file.strip()) if bactrap_file.strip() else None
+hm_path = Path(hypomap_file.strip()) if hypomap_file.strip() else None
+
 files_ready = (
-    bactrap_file.strip() != ""
-    and hypomap_file.strip() != ""
-    and Path(bactrap_file.strip()).exists()
-    and Path(hypomap_file.strip()).exists()
+    bt_path is not None
+    and hm_path is not None
+    and bt_path.is_file()
+    and hm_path.is_file()
 )
 
-if not files_ready and (bactrap_file.strip() or hypomap_file.strip()):
-    missing = []
-    if bactrap_file.strip() and not Path(bactrap_file.strip()).exists():
-        missing.append(f"bacTRAP file not found: `{bactrap_file.strip()}`")
-    if hypomap_file.strip() and not Path(hypomap_file.strip()).exists():
-        missing.append(f"HypoMap file not found: `{hypomap_file.strip()}`")
-    if missing:
-        for m in missing:
-            st.warning(m)
+if not files_ready and (bt_path or hm_path):
+    if bt_path and not bt_path.exists():
+        st.warning(f"bacTRAP file not found: `{bt_path}`")
+    elif bt_path and bt_path.is_dir():
+        st.warning(f"bacTRAP path is a directory, not a file: `{bt_path}`")
+    if hm_path and not hm_path.exists():
+        st.warning(f"HypoMap file not found: `{hm_path}`")
+    elif hm_path and hm_path.is_dir():
+        st.warning(f"HypoMap path is a directory, not a file: `{hm_path}`")
 
 if not files_ready:
     st.info("Enter file paths in the sidebar and click **Run Analysis** to begin.")
