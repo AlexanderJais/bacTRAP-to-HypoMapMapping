@@ -2,13 +2,15 @@
 Core analysis functions for bacTRAP-to-HypoMap mapping.
 
 Includes: enrichment correlation, marker gene overlap (Fisher's exact),
-UMAP enrichment scoring, and marker gene computation.
+UMAP enrichment scoring, marker gene computation, NNLS deconvolution,
+GSEA-style enrichment, and AUCell scoring.
 """
 
 import numpy as np
 import pandas as pd
 import scanpy as sc
 from scipy import stats, sparse
+from scipy.optimize import nnls
 from typing import Tuple, List, Dict, Optional
 import warnings
 
@@ -377,3 +379,401 @@ def compute_zscore_heatmap_data(
     zscored = sub.subtract(row_means, axis=0).divide(row_stds, axis=0)
 
     return zscored
+
+
+# =========================================================================
+# NNLS Deconvolution
+# =========================================================================
+
+def compute_nnls_deconvolution(
+    bactrap_matched: pd.DataFrame,
+    cluster_mean_expr: pd.DataFrame,
+    enrichment_col: str = "log2FoldChange",
+) -> pd.DataFrame:
+    """
+    Non-negative least squares deconvolution: find non-negative cluster
+    weights that best reconstruct the bacTRAP enrichment profile from
+    cluster-level mean expression signatures.
+
+    Solves: min ||A @ w - b||_2  subject to w >= 0
+    where A = (genes x clusters) mean expression, b = bacTRAP enrichment.
+
+    Returns:
+        DataFrame with columns: cluster, weight, weight_norm (0–1 scaled),
+        sorted by weight descending.
+    """
+    bt_genes = bactrap_matched["_hypomap_gene_name"].values
+    expr_genes = cluster_mean_expr.index.values
+    common = np.intersect1d(bt_genes, expr_genes)
+
+    if len(common) < 5:
+        return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
+
+    bt_lookup = dict(zip(
+        bactrap_matched["_hypomap_gene_name"],
+        bactrap_matched[enrichment_col],
+    ))
+    enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
+    valid = np.isfinite(enrichment)
+    enrichment = enrichment[valid]
+    common = common[valid]
+
+    if len(enrichment) < 5:
+        return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
+
+    A = cluster_mean_expr.loc[common].values.astype(float)  # (genes, clusters)
+    b = enrichment.astype(float)
+
+    # Shift b so it's non-negative (NNLS requires non-negative target
+    # only in the weights, but shifting can help convergence)
+    w, residual = nnls(A, b)
+
+    clusters = cluster_mean_expr.columns.tolist()
+    df = pd.DataFrame({
+        "cluster": clusters,
+        "weight": w,
+    })
+    total = df["weight"].sum()
+    df["weight_norm"] = df["weight"] / total if total > 0 else 0.0
+    df["residual"] = residual
+    df = df.sort_values("weight", ascending=False).reset_index(drop=True)
+    return df
+
+
+# =========================================================================
+# GSEA-style Preranked Enrichment
+# =========================================================================
+
+def _running_enrichment_score(
+    ranked_genes: np.ndarray,
+    gene_set: set,
+    weighted: bool = True,
+    enrichment_values: Optional[np.ndarray] = None,
+) -> Tuple[float, np.ndarray]:
+    """
+    Compute a running enrichment score (Subramanian et al., PNAS 2005).
+
+    Args:
+        ranked_genes: array of gene names sorted by enrichment metric
+        gene_set: set of gene names in the query set (lowercase)
+        weighted: if True, weight hits by their enrichment value
+        enrichment_values: array of enrichment values aligned with ranked_genes
+
+    Returns:
+        (max_ES, running_scores) — peak enrichment score and running curve
+    """
+    N = len(ranked_genes)
+    n_hit = sum(1 for g in ranked_genes if g.lower() in gene_set)
+    n_miss = N - n_hit
+
+    if n_hit == 0 or n_miss == 0:
+        return 0.0, np.zeros(N)
+
+    # Compute hit weights
+    if weighted and enrichment_values is not None:
+        hit_weights = np.array([
+            abs(enrichment_values[i]) if ranked_genes[i].lower() in gene_set else 0.0
+            for i in range(N)
+        ])
+        weight_sum = hit_weights.sum()
+        if weight_sum == 0:
+            weight_sum = 1.0
+    else:
+        hit_weights = np.array([
+            1.0 if ranked_genes[i].lower() in gene_set else 0.0
+            for i in range(N)
+        ])
+        weight_sum = n_hit
+
+    miss_penalty = 1.0 / n_miss
+    running = np.zeros(N)
+    score = 0.0
+    for i in range(N):
+        if ranked_genes[i].lower() in gene_set:
+            score += hit_weights[i] / weight_sum
+        else:
+            score -= miss_penalty
+        running[i] = score
+
+    # ES = maximum deviation from zero
+    max_pos = running.max()
+    max_neg = running.min()
+    es = max_pos if abs(max_pos) >= abs(max_neg) else max_neg
+
+    return es, running
+
+
+def compute_gsea_enrichment(
+    bactrap_matched: pd.DataFrame,
+    cluster_markers: Dict[str, List[str]],
+    enrichment_col: str = "log2FoldChange",
+    n_perm: int = 1000,
+) -> pd.DataFrame:
+    """
+    Preranked GSEA: rank all matched genes by bacTRAP enrichment, then
+    compute an enrichment score for each cluster's marker gene set.
+
+    This uses the full ranked list (not a hard cutoff), making it more
+    sensitive than Fisher's exact test.
+
+    Returns:
+        DataFrame with columns: cluster, ES, NES, pvalue, padj,
+        n_hits, running_scores, sorted by NES descending.
+    """
+    if len(bactrap_matched) == 0 or len(cluster_markers) == 0:
+        return pd.DataFrame(columns=[
+            "cluster", "ES", "NES", "pvalue", "padj", "n_hits",
+        ])
+
+    # Rank genes by enrichment (descending)
+    df_sorted = bactrap_matched.dropna(subset=[enrichment_col]).sort_values(
+        enrichment_col, ascending=False,
+    )
+    ranked_genes = df_sorted["_hypomap_gene_name"].values
+    enrichment_vals = df_sorted[enrichment_col].values.astype(float)
+
+    results = []
+    running_scores_dict = {}
+
+    for cluster, markers in cluster_markers.items():
+        marker_set = set(g.lower() for g in markers)
+        es, running = _running_enrichment_score(
+            ranked_genes, marker_set,
+            weighted=True, enrichment_values=enrichment_vals,
+        )
+
+        # Permutation test for significance
+        null_es = np.zeros(n_perm)
+        rng = np.random.default_rng(42)
+        for p in range(n_perm):
+            perm_genes = rng.permutation(ranked_genes)
+            null_es[p], _ = _running_enrichment_score(
+                perm_genes, marker_set,
+                weighted=True, enrichment_values=enrichment_vals,
+            )
+
+        # Compute p-value (one-sided for positive enrichment)
+        if es >= 0:
+            pval = (np.sum(null_es >= es) + 1) / (n_perm + 1)
+        else:
+            pval = (np.sum(null_es <= es) + 1) / (n_perm + 1)
+
+        # NES = ES / mean of absolute null
+        null_mean = np.mean(np.abs(null_es))
+        nes = es / null_mean if null_mean > 0 else 0.0
+
+        n_hits = sum(1 for g in ranked_genes if g.lower() in marker_set)
+        results.append({
+            "cluster": cluster,
+            "ES": es,
+            "NES": nes,
+            "pvalue": pval,
+            "n_hits": n_hits,
+        })
+        running_scores_dict[cluster] = running
+
+    df = pd.DataFrame(results)
+    if len(df) > 0:
+        from statsmodels.stats.multitest import multipletests
+        _, padj, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
+        df["padj"] = padj
+        df = df.sort_values("NES", ascending=False).reset_index(drop=True)
+
+    return df, running_scores_dict, ranked_genes
+
+
+# =========================================================================
+# AUCell Scoring
+# =========================================================================
+
+def compute_aucell_scores(
+    adata,
+    gene_names: List[str],
+    use_raw: bool = True,
+    top_fraction: float = 0.05,
+) -> np.ndarray:
+    """
+    Compute AUCell scores for each cell.
+
+    AUCell (Aibar et al., Nature Methods 2017) ranks genes by expression
+    within each cell, then computes the Area Under the recovery Curve (AUC)
+    for the gene set of interest within the top-ranked genes.
+
+    This is more robust than simple mean expression because:
+    - It's rank-based (insensitive to normalization differences)
+    - It focuses on highly expressed genes per cell
+    - It's threshold-free
+
+    Args:
+        adata: AnnData object
+        gene_names: list of bacTRAP-enriched gene names
+        use_raw: whether to use adata.raw for expression
+        top_fraction: fraction of ranked genes to consider (default 5%)
+
+    Returns:
+        Array of AUCell scores, one per cell.
+    """
+    adata_gene_names = get_gene_names_from_adata(adata)
+    gene_lower_to_idx = {str(g).lower(): i for i, g in enumerate(adata_gene_names)}
+
+    # Map input genes to adata.var indices
+    query_idx = []
+    for g in gene_names:
+        g_lower = str(g).lower()
+        if g_lower in gene_lower_to_idx:
+            query_idx.append(gene_lower_to_idx[g_lower])
+
+    if len(query_idx) == 0:
+        return np.zeros(adata.n_obs)
+
+    query_idx_set = set(query_idx)
+
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+        # Remap indices to raw space
+        raw_gene_names = get_gene_names_from_adata(
+            type('obj', (object,), {
+                'var_names': adata.raw.var_names,
+                'var': adata.raw.var,
+            })()
+        ) if hasattr(adata.raw, 'var') else adata.raw.var_names
+        raw_lower_to_idx = {}
+        if hasattr(raw_gene_names, '__iter__'):
+            for i, g in enumerate(raw_gene_names):
+                raw_lower_to_idx[str(g).lower()] = i
+
+        query_idx_raw = []
+        for g in gene_names:
+            g_lower = str(g).lower()
+            if g_lower in raw_lower_to_idx:
+                query_idx_raw.append(raw_lower_to_idx[g_lower])
+        query_idx_set = set(query_idx_raw)
+        n_total_genes = X.shape[1]
+    else:
+        X = adata.X
+        n_total_genes = X.shape[1]
+
+    n_cells = X.shape[0]
+    n_query = len(query_idx_set)
+
+    if n_query == 0:
+        return np.zeros(n_cells)
+
+    # Number of top genes to consider per cell
+    n_top = max(int(n_total_genes * top_fraction), n_query)
+    n_top = min(n_top, n_total_genes)
+
+    # Process in cell chunks to limit memory
+    chunk_size = 5000
+    scores = np.zeros(n_cells, dtype=np.float32)
+
+    for start in range(0, n_cells, chunk_size):
+        end = min(start + chunk_size, n_cells)
+        X_chunk = X[start:end, :]
+        if sparse.issparse(X_chunk):
+            X_chunk = np.asarray(X_chunk.toarray())
+        else:
+            X_chunk = np.asarray(X_chunk)
+
+        # For each cell, rank genes (descending expression), compute AUC
+        for i in range(X_chunk.shape[0]):
+            cell_expr = X_chunk[i, :]
+            # Get indices of top-ranked genes
+            top_gene_idx = np.argpartition(cell_expr, -n_top)[-n_top:]
+            # Sort them by expression (descending)
+            top_sorted = top_gene_idx[np.argsort(cell_expr[top_gene_idx])[::-1]]
+
+            # Compute recovery: how many query genes appear as we walk down
+            hits = 0
+            auc = 0.0
+            for rank, gene_idx in enumerate(top_sorted):
+                if gene_idx in query_idx_set:
+                    hits += 1
+                auc += hits
+            # Normalize: max possible AUC = n_query * n_top
+            max_auc = n_query * n_top
+            scores[start + i] = auc / max_auc if max_auc > 0 else 0.0
+
+    return scores
+
+
+# =========================================================================
+# Composite Ranking
+# =========================================================================
+
+def compute_composite_ranking(
+    corr_df: pd.DataFrame,
+    fisher_df: pd.DataFrame,
+    nnls_df: pd.DataFrame,
+    gsea_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """
+    Combine multiple ranking methods into a single consensus ranking.
+
+    For each method, ranks are converted to percentile scores (0–1),
+    then averaged. This produces a robust ranking that doesn't depend
+    on any single method's assumptions.
+
+    Returns:
+        DataFrame with columns: cluster, corr_rank, fisher_rank, nnls_rank,
+        gsea_rank (if available), composite_score, sorted by composite_score.
+    """
+    # Collect rankings from each method
+    rankings = {}
+
+    if len(corr_df) > 0:
+        rank_corr = corr_df[["cluster", "spearman_r"]].copy()
+        rank_corr["corr_rank"] = rank_corr["spearman_r"].rank(ascending=False, method="min")
+        n = len(rank_corr)
+        rank_corr["corr_pctl"] = 1 - (rank_corr["corr_rank"] - 1) / max(n - 1, 1)
+        rankings["corr"] = rank_corr.set_index("cluster")
+
+    if len(fisher_df) > 0:
+        rank_fisher = fisher_df[["cluster", "pvalue"]].copy()
+        rank_fisher["fisher_rank"] = rank_fisher["pvalue"].rank(ascending=True, method="min")
+        n = len(rank_fisher)
+        rank_fisher["fisher_pctl"] = 1 - (rank_fisher["fisher_rank"] - 1) / max(n - 1, 1)
+        rankings["fisher"] = rank_fisher.set_index("cluster")
+
+    if len(nnls_df) > 0:
+        rank_nnls = nnls_df[["cluster", "weight"]].copy()
+        rank_nnls["nnls_rank"] = rank_nnls["weight"].rank(ascending=False, method="min")
+        n = len(rank_nnls)
+        rank_nnls["nnls_pctl"] = 1 - (rank_nnls["nnls_rank"] - 1) / max(n - 1, 1)
+        rankings["nnls"] = rank_nnls.set_index("cluster")
+
+    if gsea_df is not None and len(gsea_df) > 0:
+        rank_gsea = gsea_df[["cluster", "NES"]].copy()
+        rank_gsea["gsea_rank"] = rank_gsea["NES"].rank(ascending=False, method="min")
+        n = len(rank_gsea)
+        rank_gsea["gsea_pctl"] = 1 - (rank_gsea["gsea_rank"] - 1) / max(n - 1, 1)
+        rankings["gsea"] = rank_gsea.set_index("cluster")
+
+    if len(rankings) == 0:
+        return pd.DataFrame(columns=["cluster", "composite_score"])
+
+    # Merge on cluster
+    all_clusters = set()
+    for r in rankings.values():
+        all_clusters.update(r.index)
+
+    rows = []
+    for cluster in all_clusters:
+        row = {"cluster": cluster}
+        pctls = []
+        for method, rdf in rankings.items():
+            if cluster in rdf.index:
+                pctl = rdf.loc[cluster, f"{method}_pctl"]
+                row[f"{method}_rank"] = rdf.loc[cluster, f"{method}_rank"]
+                row[f"{method}_pctl"] = pctl
+                pctls.append(pctl)
+            else:
+                row[f"{method}_rank"] = np.nan
+                row[f"{method}_pctl"] = 0.0
+                pctls.append(0.0)
+        row["composite_score"] = np.mean(pctls)
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("composite_score", ascending=False).reset_index(drop=True)
+    return df

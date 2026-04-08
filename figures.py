@@ -510,6 +510,289 @@ def figure_heatmap(
 
 
 # ---------------------------------------------------------------------------
+# Figure F: NNLS Deconvolution Barplot
+# ---------------------------------------------------------------------------
+
+def figure_nnls_barplot(
+    nnls_df: pd.DataFrame,
+    top_n: int = 20,
+    double_column: bool = False,
+) -> plt.Figure:
+    """
+    Horizontal barplot of NNLS deconvolution weights per cluster.
+    Only shows clusters with non-zero weights.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    df = nnls_df[nnls_df["weight"] > 1e-6].head(top_n).copy()
+
+    if len(df) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No clusters with non-zero NNLS weights",
+                ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    df = df.iloc[::-1]
+    n_bars = len(df)
+    height = max(width * 0.5, n_bars * 0.18 + 0.8)
+
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    norm = Normalize(vmin=0, vmax=df["weight_norm"].max())
+    cmap = plt.colormaps["magma"]
+    colors = [cmap(norm(v)) for v in df["weight_norm"]]
+
+    ax.barh(
+        range(n_bars), df["weight_norm"], color=colors,
+        edgecolor="none", height=0.7,
+    )
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        ax.text(
+            row["weight_norm"] + 0.005, i,
+            f"{row['weight_norm']:.3f}",
+            va="center", ha="left", fontsize=5,
+        )
+
+    ax.set_yticks(range(n_bars))
+    ax.set_yticklabels(df["cluster"], fontsize=6)
+    ax.set_xlabel("NNLS weight (normalized)")
+    ax.set_title("NNLS deconvolution of bacTRAP enrichment profile")
+
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.6, aspect=20, pad=0.02)
+    cbar.set_label("Normalized weight", fontsize=6)
+    cbar.ax.tick_params(labelsize=5)
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure G: GSEA Enrichment Curves
+# ---------------------------------------------------------------------------
+
+def figure_gsea_curves(
+    gsea_df: pd.DataFrame,
+    running_scores: Dict[str, np.ndarray],
+    ranked_genes: np.ndarray,
+    top_n: int = 5,
+    double_column: bool = False,
+) -> plt.Figure:
+    """
+    Running enrichment score curves for the top GSEA-enriched clusters.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    top = gsea_df.head(top_n)
+    if len(top) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No GSEA results", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
+    n_genes = len(ranked_genes)
+    height = width * 0.6
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    palette = get_qualitative_palette(len(top))
+    for i, (_, row) in enumerate(top.iterrows()):
+        cluster = row["cluster"]
+        if cluster in running_scores:
+            curve = running_scores[cluster]
+            ax.plot(
+                np.arange(len(curve)), curve,
+                color=palette[i], linewidth=0.8,
+                label=f"{cluster} (NES={row['NES']:.2f})",
+            )
+
+    ax.axhline(0, color="black", linewidth=0.3, linestyle="-")
+    ax.set_xlabel("Gene rank (by bacTRAP enrichment)")
+    ax.set_ylabel("Running enrichment score")
+    ax.set_title("GSEA: cluster marker enrichment in bacTRAP-ranked genes")
+    ax.legend(fontsize=5, frameon=False, loc="upper right")
+    ax.set_xlim(0, n_genes)
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure H: GSEA NES Barplot
+# ---------------------------------------------------------------------------
+
+def figure_gsea_barplot(
+    gsea_df: pd.DataFrame,
+    top_n: int = 20,
+    double_column: bool = False,
+) -> plt.Figure:
+    """Horizontal barplot of top clusters by Normalized Enrichment Score."""
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    df = gsea_df.head(top_n).copy()
+    if len(df) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No GSEA results", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
+    df = df.iloc[::-1]
+    n_bars = len(df)
+    height = max(width * 0.5, n_bars * 0.18 + 0.8)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    sig_mask = df["padj"] < 0.05
+    colors = ["#d62728" if s else "#bbbbbb" for s in sig_mask]
+
+    ax.barh(range(n_bars), df["NES"], color=colors, edgecolor="none", height=0.7)
+    ax.axvline(0, color="black", linewidth=0.5, linestyle="--")
+
+    for i, (_, row) in enumerate(df.iterrows()):
+        label = f"{row['NES']:.2f}"
+        if row["padj"] < 0.05:
+            label += "*"
+        offset = 0.02 if row["NES"] >= 0 else -0.02
+        ha = "left" if row["NES"] >= 0 else "right"
+        ax.text(row["NES"] + offset, i, label, va="center", ha=ha, fontsize=5)
+
+    ax.set_yticks(range(n_bars))
+    ax.set_yticklabels(df["cluster"], fontsize=6)
+    ax.set_xlabel("Normalized Enrichment Score (NES)")
+    ax.set_title("GSEA: preranked enrichment of cluster markers")
+
+    # Custom legend
+    from matplotlib.patches import Patch
+    handles = [
+        Patch(facecolor="#d62728", label="FDR < 0.05"),
+        Patch(facecolor="#bbbbbb", label="Not significant"),
+    ]
+    ax.legend(handles=handles, fontsize=5, frameon=False, loc="lower right")
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure I: AUCell UMAP
+# ---------------------------------------------------------------------------
+
+def figure_aucell_umap(
+    umap_coords: np.ndarray,
+    aucell_scores: np.ndarray,
+    double_column: bool = False,
+    point_size: float = 0.3,
+    subsample_idx: Optional[np.ndarray] = None,
+) -> plt.Figure:
+    """UMAP colored by AUCell enrichment scores."""
+    setup_nature_style()
+    width = get_figure_width(double_column)
+    height = width * 0.8
+
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    if subsample_idx is not None:
+        umap_coords = umap_coords[subsample_idx]
+        aucell_scores = aucell_scores[subsample_idx]
+
+    # Shuffle for fair overlap
+    rng = np.random.default_rng(42)
+    order = rng.permutation(len(umap_coords))
+    umap_coords = umap_coords[order]
+    aucell_scores = aucell_scores[order]
+
+    vmin = np.percentile(aucell_scores, 2)
+    vmax = np.percentile(aucell_scores, 98)
+
+    sc = ax.scatter(
+        umap_coords[:, 0], umap_coords[:, 1],
+        c=aucell_scores, cmap="magma", s=point_size, alpha=0.7,
+        edgecolors="none", rasterized=True,
+        vmin=vmin, vmax=vmax,
+    )
+    ax.set_xlabel("UMAP1")
+    ax.set_ylabel("UMAP2")
+    ax.set_title("AUCell enrichment score (PoA bacTRAP)")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.7, aspect=20, pad=0.02)
+    cbar.set_label("AUCell score", fontsize=6)
+    cbar.ax.tick_params(labelsize=5)
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure J: Composite Ranking Heatmap
+# ---------------------------------------------------------------------------
+
+def figure_composite_ranking(
+    composite_df: pd.DataFrame,
+    top_n: int = 20,
+    double_column: bool = True,
+) -> plt.Figure:
+    """
+    Heatmap showing percentile scores across all methods for top clusters.
+    Columns = methods, rows = clusters, color = percentile (0–1).
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    pctl_cols = [c for c in composite_df.columns if c.endswith("_pctl")]
+    if len(pctl_cols) == 0 or len(composite_df) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No composite ranking data", ha="center",
+                va="center", transform=ax.transAxes)
+        return fig
+
+    df = composite_df.head(top_n).copy()
+    n_clusters = len(df)
+    n_methods = len(pctl_cols)
+
+    height = max(2.5, n_clusters * 0.2 + 1.2)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    data = df[pctl_cols].values
+    method_labels = [c.replace("_pctl", "").upper() for c in pctl_cols]
+
+    im = ax.imshow(
+        data, aspect="auto", cmap="YlOrRd", vmin=0, vmax=1,
+        interpolation="nearest",
+    )
+
+    ax.set_xticks(range(n_methods))
+    ax.set_xticklabels(method_labels, fontsize=6)
+    ax.set_yticks(range(n_clusters))
+    ax.set_yticklabels(df["cluster"].values, fontsize=5)
+
+    # Add score text in cells
+    for i in range(n_clusters):
+        for j in range(n_methods):
+            val = data[i, j]
+            text_color = "white" if val > 0.6 else "black"
+            ax.text(j, i, f"{val:.2f}", ha="center", va="center",
+                    fontsize=4, color=text_color)
+
+    # Add composite score as right-side annotation
+    for i, (_, row) in enumerate(df.iterrows()):
+        ax.text(
+            n_methods - 0.3, i, f"{row['composite_score']:.2f}",
+            ha="left", va="center", fontsize=5, fontweight="bold",
+        )
+
+    ax.set_title("Consensus ranking across all methods")
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.6, aspect=20, pad=0.02)
+    cbar.set_label("Percentile score", fontsize=6)
+    cbar.ax.tick_params(labelsize=5)
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Export utilities
 # ---------------------------------------------------------------------------
 

@@ -142,6 +142,10 @@ from analysis import (
     fisher_overlap_test,
     compute_enrichment_score,
     compute_zscore_heatmap_data,
+    compute_nnls_deconvolution,
+    compute_gsea_enrichment,
+    compute_aucell_scores,
+    compute_composite_ranking,
 )
 from figures import (
     setup_nature_style,
@@ -150,6 +154,11 @@ from figures import (
     figure_dotplot,
     figure_volcano_enrichment,
     figure_heatmap,
+    figure_nnls_barplot,
+    figure_gsea_curves,
+    figure_gsea_barplot,
+    figure_aucell_umap,
+    figure_composite_ranking,
     fig_to_bytes,
 )
 
@@ -186,12 +195,15 @@ annotation_col = st.sidebar.selectbox(
 # Progress bar placeholder — rendered above tabs so it's always visible
 progress_placeholder = st.empty()
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "📊 Data Overview",
-    "📈 Correlation Analysis",
+    "📈 Correlation",
     "🗺️ UMAP Projection",
     "🔬 Marker Overlap",
-    "🔥 Gene Heatmap",
+    "🔥 Heatmap",
+    "⚖️ NNLS Deconvolution",
+    "📶 GSEA",
+    "🎯 Composite Ranking",
     "📥 Export",
 ])
 
@@ -230,7 +242,7 @@ if run_button or st.session_state.analysis_done:
 
     # ---- Correlation analysis ----
     corr_df = compute_enrichment_correlation(bactrap_matched, cluster_mean_expr)
-    progress.progress(45, text="Computing marker gene overlap...")
+    progress.progress(30, text="Computing marker gene overlap...")
 
     # ---- Marker gene overlap ----
     # Try pre-computed markers first, but only if they match the selected
@@ -249,11 +261,11 @@ if run_button or st.session_state.analysis_done:
                 n_genes=n_markers_per_cluster,
                 min_cells=min_cells_per_cluster,
             )
-    progress.progress(65, text="Running Fisher's exact test...")
+    progress.progress(45, text="Running Fisher's exact test...")
 
     universe_size = len(matched_genes)
     fisher_df = fisher_overlap_test(enriched_genes_list, markers, universe_size)
-    progress.progress(75, text="Computing UMAP enrichment scores...")
+    progress.progress(50, text="Computing UMAP enrichment scores...")
 
     # ---- UMAP enrichment score ----
     if len(top_enriched_genes) == 0:
@@ -263,7 +275,7 @@ if run_button or st.session_state.analysis_done:
             "Try relaxing the cutoffs."
         )
     enrichment_scores = compute_enrichment_score(adata, top_enriched_genes)
-    progress.progress(85, text="Preparing figures...")
+    progress.progress(55, text="Preparing figures...")
 
     # ---- Fraction expressing for dotplot ----
     enriched_gene_indices = [gene_to_idx[g] for g in top_enriched_genes if g in gene_to_idx]
@@ -286,6 +298,37 @@ if run_button or st.session_state.analysis_done:
     top_genes_heatmap = top_enriched_genes[:30]
     zscore_df = compute_zscore_heatmap_data(
         cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
+    )
+
+    progress.progress(60, text="Running NNLS deconvolution...")
+
+    # ---- NNLS deconvolution ----
+    nnls_df = compute_nnls_deconvolution(bactrap_matched, cluster_mean_expr)
+
+    progress.progress(65, text="Running GSEA enrichment...")
+
+    # ---- GSEA enrichment ----
+    gsea_result = compute_gsea_enrichment(
+        bactrap_matched, markers, n_perm=1000,
+    )
+    if isinstance(gsea_result, tuple) and len(gsea_result) == 3:
+        gsea_df, gsea_running_scores, gsea_ranked_genes = gsea_result
+    else:
+        gsea_df = pd.DataFrame()
+        gsea_running_scores = {}
+        gsea_ranked_genes = np.array([])
+
+    progress.progress(80, text="Computing AUCell scores...")
+
+    # ---- AUCell scoring ----
+    aucell_scores = compute_aucell_scores(adata, top_enriched_genes)
+
+    progress.progress(85, text="Computing composite ranking...")
+
+    # ---- Composite ranking ----
+    composite_df = compute_composite_ranking(
+        corr_df, fisher_df, nnls_df,
+        gsea_df if len(gsea_df) > 0 else None,
     )
 
     progress.progress(95, text="Generating figures...")
@@ -594,9 +637,234 @@ if run_button or st.session_state.analysis_done:
             st.warning("No heatmap data available with current parameters.")
 
     # ======================================================================
-    # TAB 6: Export
+    # TAB 6: NNLS Deconvolution
     # ======================================================================
     with tab6:
+        st.header("NNLS Deconvolution")
+        st.markdown(
+            "Non-negative least squares: find cluster weights that best "
+            "reconstruct the bacTRAP enrichment profile from cluster-level "
+            "expression signatures."
+        )
+
+        if len(nnls_df) > 0:
+            nonzero = nnls_df[nnls_df["weight"] > 1e-6]
+            st.metric("Clusters with non-zero weight", len(nonzero))
+
+            st.subheader("NNLS Weights")
+            st.dataframe(
+                nnls_df[nnls_df["weight"] > 1e-6][["cluster", "weight", "weight_norm"]].style.format({
+                    "weight": "{:.4f}",
+                    "weight_norm": "{:.4f}",
+                }),
+                use_container_width=True,
+            )
+
+            st.subheader("Figure F: NNLS Deconvolution")
+            fig_f = figure_nnls_barplot(nnls_df, top_n=20, double_column=double_column)
+            st.pyplot(fig_f)
+            _cache_fig("fig_f_nnls", fig_f)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_f_nnls"]["pdf"],
+                    "fig_f_nnls.pdf", "application/pdf",
+                    key="dl_fig_f_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_f_nnls"]["svg"],
+                    "fig_f_nnls.svg", "image/svg+xml",
+                    key="dl_fig_f_svg",
+                )
+            plt.close(fig_f)
+
+            st.download_button(
+                "Download NNLS results (CSV)",
+                nnls_df.to_csv(index=False).encode(),
+                "nnls_results.csv", "text/csv",
+                key="dl_nnls_csv",
+            )
+        else:
+            st.warning("NNLS deconvolution produced no results.")
+
+    # ======================================================================
+    # TAB 7: GSEA
+    # ======================================================================
+    with tab7:
+        st.header("GSEA: Preranked Enrichment")
+        st.markdown(
+            "All matched genes are ranked by bacTRAP log₂FC. For each cluster's "
+            "marker gene set, a running enrichment score is computed — more "
+            "powerful than Fisher's binary overlap test because it uses the "
+            "full ranking."
+        )
+
+        if len(gsea_df) > 0:
+            st.subheader("Enrichment Results")
+            st.dataframe(
+                gsea_df[["cluster", "ES", "NES", "pvalue", "padj", "n_hits"]].style.format({
+                    "ES": "{:.4f}",
+                    "NES": "{:.4f}",
+                    "pvalue": "{:.2e}",
+                    "padj": "{:.2e}",
+                }),
+                use_container_width=True,
+            )
+
+            st.subheader("Figure G: Enrichment Curves (top 5)")
+            fig_g = figure_gsea_curves(
+                gsea_df, gsea_running_scores, gsea_ranked_genes,
+                top_n=5, double_column=double_column,
+            )
+            st.pyplot(fig_g)
+            _cache_fig("fig_g_gsea_curves", fig_g)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_g_gsea_curves"]["pdf"],
+                    "fig_g_gsea_curves.pdf", "application/pdf",
+                    key="dl_fig_g_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_g_gsea_curves"]["svg"],
+                    "fig_g_gsea_curves.svg", "image/svg+xml",
+                    key="dl_fig_g_svg",
+                )
+            plt.close(fig_g)
+
+            st.subheader("Figure H: NES Barplot")
+            fig_h = figure_gsea_barplot(gsea_df, top_n=20, double_column=double_column)
+            st.pyplot(fig_h)
+            _cache_fig("fig_h_gsea_barplot", fig_h)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_h_gsea_barplot"]["pdf"],
+                    "fig_h_gsea_barplot.pdf", "application/pdf",
+                    key="dl_fig_h_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_h_gsea_barplot"]["svg"],
+                    "fig_h_gsea_barplot.svg", "image/svg+xml",
+                    key="dl_fig_h_svg",
+                )
+            plt.close(fig_h)
+
+            st.download_button(
+                "Download GSEA results (CSV)",
+                gsea_df.to_csv(index=False).encode(),
+                "gsea_results.csv", "text/csv",
+                key="dl_gsea_csv",
+            )
+
+            # AUCell UMAP (shown here alongside GSEA as a complementary view)
+            st.markdown("---")
+            st.subheader("Figure I: AUCell Enrichment UMAP")
+            st.markdown(
+                "AUCell (rank-based Area Under the Curve) scores per cell — "
+                "more robust than mean expression because it's rank-based and "
+                "threshold-free."
+            )
+            fig_i = figure_aucell_umap(
+                umap_coords, aucell_scores,
+                double_column=double_column,
+                subsample_idx=sub_indices,
+            )
+            st.pyplot(fig_i)
+            _cache_fig("fig_i_aucell_umap", fig_i)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_i_aucell_umap"]["pdf"],
+                    "fig_i_aucell_umap.pdf", "application/pdf",
+                    key="dl_fig_i_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_i_aucell_umap"]["svg"],
+                    "fig_i_aucell_umap.svg", "image/svg+xml",
+                    key="dl_fig_i_svg",
+                )
+            plt.close(fig_i)
+        else:
+            st.warning("No GSEA results to display.")
+
+    # ======================================================================
+    # TAB 8: Composite Ranking
+    # ======================================================================
+    with tab8:
+        st.header("Composite Consensus Ranking")
+        st.markdown(
+            "Combines all methods (Correlation, Fisher's, NNLS, GSEA) into a "
+            "single consensus ranking by averaging percentile scores. This "
+            "produces a robust ranking that doesn't depend on any single method."
+        )
+
+        if len(composite_df) > 0:
+            st.subheader("Top Clusters (Consensus)")
+            display_cols = ["cluster", "composite_score"]
+            for c in composite_df.columns:
+                if c.endswith("_pctl"):
+                    display_cols.append(c)
+            st.dataframe(
+                composite_df[display_cols].head(30).style.format(
+                    {c: "{:.3f}" for c in display_cols if c != "cluster"}
+                ),
+                use_container_width=True,
+            )
+
+            st.subheader("Figure J: Multi-Method Comparison")
+            fig_j = figure_composite_ranking(
+                composite_df, top_n=20, double_column=True,
+            )
+            st.pyplot(fig_j)
+            _cache_fig("fig_j_composite", fig_j)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_j_composite"]["pdf"],
+                    "fig_j_composite.pdf", "application/pdf",
+                    key="dl_fig_j_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_j_composite"]["svg"],
+                    "fig_j_composite.svg", "image/svg+xml",
+                    key="dl_fig_j_svg",
+                )
+            plt.close(fig_j)
+
+            st.download_button(
+                "Download composite ranking (CSV)",
+                composite_df.to_csv(index=False).encode(),
+                "composite_ranking.csv", "text/csv",
+                key="dl_composite_csv",
+            )
+        else:
+            st.warning("No composite ranking data available.")
+
+    # ======================================================================
+    # TAB 9: Export
+    # ======================================================================
+    with tab9:
         st.header("Export All Results")
 
         st.subheader("Figures")
@@ -666,6 +934,32 @@ if run_button or st.session_state.analysis_done:
                 zscore_df.to_csv().encode(),
                 "zscore_heatmap.csv", "text/csv",
                 key="dl_zscore_csv",
+            )
+
+        col_t5, col_t6 = st.columns(2)
+        with col_t5:
+            if len(nnls_df) > 0:
+                st.download_button(
+                    "NNLS results (CSV)",
+                    nnls_df.to_csv(index=False).encode(),
+                    "nnls_results.csv", "text/csv",
+                    key="dl_nnls_csv_export",
+                )
+        with col_t6:
+            if len(gsea_df) > 0:
+                st.download_button(
+                    "GSEA results (CSV)",
+                    gsea_df.to_csv(index=False).encode(),
+                    "gsea_results.csv", "text/csv",
+                    key="dl_gsea_csv_export",
+                )
+
+        if len(composite_df) > 0:
+            st.download_button(
+                "Composite ranking (CSV)",
+                composite_df.to_csv(index=False).encode(),
+                "composite_ranking.csv", "text/csv",
+                key="dl_composite_csv_export",
             )
 
 else:
