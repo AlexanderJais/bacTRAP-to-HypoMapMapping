@@ -117,9 +117,51 @@ def match_genes(
 
 
 def _resolve_gene_names(adata: ad.AnnData, gene_indices: np.ndarray) -> List[str]:
-    """Resolve gene indices to display names, consistent with match_genes()."""
+    """Resolve gene indices in adata.var to display names."""
     adata_gene_names = get_gene_names_from_adata(adata)
     return [str(adata_gene_names[i]) for i in gene_indices]
+
+
+def _map_var_indices_to_raw(
+    adata: ad.AnnData,
+    gene_indices: np.ndarray,
+) -> np.ndarray:
+    """
+    Map gene indices from adata.var space to adata.raw.var space.
+
+    When adata.raw has more genes than adata (common after gene filtering),
+    indices into adata.var do NOT correspond to the same columns in
+    adata.raw.X. This function translates them via gene name lookup.
+
+    Returns an array of indices into adata.raw.var. Genes not found in
+    raw are dropped (returns a shorter array).
+    """
+    if adata.raw is None:
+        return gene_indices
+
+    # Get gene names for the requested indices in adata.var
+    var_gene_names = get_gene_names_from_adata(adata)
+    query_names = [str(var_gene_names[i]).lower() for i in gene_indices]
+
+    # Build lookup for raw var names
+    raw_var_names = adata.raw.var_names
+    raw_lookup = {}
+    for i, name in enumerate(raw_var_names):
+        raw_lookup[str(name).lower()] = i
+
+    # If raw var_names are Ensembl IDs, also check gene symbol columns
+    if len(raw_var_names) > 0 and str(raw_var_names[0]).startswith("ENSMUSG"):
+        for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
+            if col in adata.raw.var.columns:
+                for i, name in enumerate(adata.raw.var[col]):
+                    raw_lookup[str(name).lower()] = i
+                break
+
+    raw_indices = []
+    for name in query_names:
+        if name in raw_lookup:
+            raw_indices.append(raw_lookup[name])
+    return np.array(raw_indices, dtype=int)
 
 
 def _extract_gene_submatrix(
@@ -130,14 +172,27 @@ def _extract_gene_submatrix(
     """
     Extract a dense (n_cells, n_genes) submatrix for the given gene indices.
 
-    Processes in column chunks to avoid materializing the full sparse matrix.
+    gene_indices are always in adata.var space. When use_raw=True and
+    adata.raw exists, they are remapped to adata.raw.var space so that
+    the correct columns are extracted from the raw expression matrix.
     """
     if use_raw and adata.raw is not None:
         X = adata.raw.X
+        # Remap indices from adata.var space to adata.raw.var space
+        if X.shape[1] != adata.X.shape[1]:
+            gene_indices = _map_var_indices_to_raw(adata, gene_indices)
     else:
         X = adata.X
 
     n_cells = X.shape[0]
+    n_genes = len(gene_indices)
+
+    if n_genes == 0:
+        return np.empty((n_cells, 0), dtype=np.float32)
+
+    # Validate indices are within bounds
+    max_idx = X.shape[1]
+    gene_indices = gene_indices[gene_indices < max_idx]
     n_genes = len(gene_indices)
 
     if n_genes == 0:
@@ -174,6 +229,9 @@ def compute_cluster_mean_expression(
     """
     Compute mean expression per cluster for a set of genes.
 
+    gene_indices refer to positions in adata.var. When use_raw=True,
+    they are remapped internally to adata.raw.var.
+
     Returns a DataFrame with shape (n_genes, n_clusters).
     """
     gene_indices_arr = np.array(gene_indices)
@@ -190,6 +248,9 @@ def compute_cluster_mean_expression(
         result[str(label)] = X_genes[mask, :].mean(axis=0)
 
     gene_names = _resolve_gene_names(adata, gene_indices_arr)
+    # Handle case where raw mapping dropped some genes
+    if len(gene_names) != X_genes.shape[1]:
+        gene_names = gene_names[:X_genes.shape[1]]
     return pd.DataFrame(result, index=gene_names)
 
 
@@ -220,6 +281,8 @@ def compute_fraction_expressing(
         result[str(label)] = (X_genes[mask, :] > threshold).mean(axis=0)
 
     gene_names = _resolve_gene_names(adata, gene_indices_arr)
+    if len(gene_names) != X_genes.shape[1]:
+        gene_names = gene_names[:X_genes.shape[1]]
     return pd.DataFrame(result, index=gene_names)
 
 

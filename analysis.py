@@ -197,6 +197,13 @@ def fisher_overlap_test(
         DataFrame with columns: cluster, overlap_count, overlap_genes,
         odds_ratio, pvalue, neg_log10_pval, sorted by pvalue.
     """
+    if len(enriched_genes) == 0 or len(cluster_markers) == 0:
+        return pd.DataFrame(columns=[
+            "cluster", "overlap_count", "n_enriched", "n_markers",
+            "overlap_genes", "odds_ratio", "pvalue", "neg_log10_pval",
+            "log2_odds_ratio", "padj",
+        ])
+
     enriched_set = set(g.lower() for g in enriched_genes)
     n_enriched = len(enriched_set)
 
@@ -291,12 +298,18 @@ def compute_enrichment_score(
     # Manual z-scored mean — avoids adata.copy() which doubles memory for
     # the full atlas. sc.tl.score_genes requires a copy and uses more RAM
     # than we can afford with a ~3.9GB object.
-    var_name_set = set(var_names_list)
-    gene_idx = [var_names_list.index(g) for g in score_gene_list if g in var_name_set]
+    # Build index lookup for the correct expression source (var vs raw.var)
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+        source_var_names = list(adata.raw.var_names)
+    else:
+        X = adata.X
+        source_var_names = var_names_list
+
+    source_var_to_idx = {vn: i for i, vn in enumerate(source_var_names)}
+    gene_idx = [source_var_to_idx[g] for g in score_gene_list if g in source_var_to_idx]
     if len(gene_idx) == 0:
         return np.zeros(adata.n_obs)
-
-    X = adata.raw.X if (use_raw and adata.raw is not None) else adata.X
     X_sub = X[:, gene_idx]
     if sparse.issparse(X_sub):
         X_sub = np.asarray(X_sub.toarray())

@@ -177,8 +177,11 @@ annotation_col = st.sidebar.selectbox(
 )
 
 # ---------------------------------------------------------------------------
-# Tabs
+# Run analysis
 # ---------------------------------------------------------------------------
+
+# Progress bar placeholder — rendered above tabs so it's always visible
+progress_placeholder = st.empty()
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Data Overview",
@@ -189,15 +192,10 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📥 Export",
 ])
 
-
-# ---------------------------------------------------------------------------
-# Run analysis
-# ---------------------------------------------------------------------------
-
 if run_button or st.session_state.analysis_done:
 
     # ---- Gene matching ----
-    progress = st.progress(0, text="Matching genes...")
+    progress = progress_placeholder.progress(0, text="Matching genes...")
 
     bactrap_matched, matched_genes, gene_to_idx = match_genes(bactrap_df, adata)
 
@@ -232,8 +230,15 @@ if run_button or st.session_state.analysis_done:
     progress.progress(45, text="Computing marker gene overlap...")
 
     # ---- Marker gene overlap ----
-    # Try pre-computed markers first
+    # Try pre-computed markers first, but only if they match the selected
+    # annotation column (pre-computed markers may be for a different level).
     markers = load_precomputed_markers(adata)
+    if markers is not None:
+        current_clusters = set(adata.obs[annotation_col].unique().astype(str))
+        marker_clusters = set(markers.keys())
+        overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
+        if overlap_ratio < 0.5:
+            markers = None  # mismatch — recompute for the selected annotation
     if markers is None:
         with st.spinner("Computing marker genes (this may take several minutes)..."):
             markers = compute_marker_genes(
@@ -302,6 +307,7 @@ if run_button or st.session_state.analysis_done:
     cell_labels = adata.obs[annotation_col].values.astype(str)
 
     progress.progress(100, text="Analysis complete!")
+    progress_placeholder.empty()  # clear progress bar after completion
     st.session_state.analysis_done = True
 
     # Cache figure bytes so the Export tab doesn't regenerate them.

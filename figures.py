@@ -61,7 +61,9 @@ def setup_nature_style():
         "pdf.fonttype": 42,  # TrueType fonts in PDF (editable)
         "ps.fonttype": 42,
         "svg.fonttype": "none",  # editable text in SVG
-        "figure.constrained_layout.use": True,
+        # Do NOT enable constrained_layout globally — it conflicts with
+        # bbox_to_anchor legends and manual colorbar pad placement.
+        "figure.constrained_layout.use": False,
     })
 
 
