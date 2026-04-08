@@ -221,7 +221,7 @@ if run_button or st.session_state.analysis_done:
     # ---- Gene matching ----
     progress = progress_placeholder.progress(0, text="Matching genes...")
 
-    bactrap_matched, matched_genes, gene_to_idx = match_genes(bactrap_df, adata)
+    bactrap_matched, matched_genes, gene_to_idx, matched_in_raw = match_genes(bactrap_df, adata)
 
     if len(matched_genes) == 0:
         progress.empty()
@@ -236,6 +236,7 @@ if run_button or st.session_state.analysis_done:
     gene_indices = [gene_to_idx[g] for g in matched_genes]
     cluster_mean_expr = compute_cluster_mean_expression(
         adata, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
+        indices_in_raw=matched_in_raw,
     )
     progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
 
@@ -296,10 +297,12 @@ if run_button or st.session_state.analysis_done:
     frac_expr = compute_fraction_expressing(
         adata, enriched_gene_indices, annotation_col,
         min_cells=min_cells_per_cluster,
+        indices_in_raw=matched_in_raw,
     )
     enriched_mean_expr = compute_cluster_mean_expression(
         adata, enriched_gene_indices, annotation_col,
         min_cells=min_cells_per_cluster,
+        indices_in_raw=matched_in_raw,
     )
 
     # ---- Z-score heatmap data ----

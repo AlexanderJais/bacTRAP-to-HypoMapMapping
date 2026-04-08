@@ -49,16 +49,24 @@ def get_annotation_columns(adata: ad.AnnData) -> List[str]:
     return sorted(candidates)
 
 
-def get_gene_names_from_adata(adata: ad.AnnData) -> np.ndarray:
-    """Extract gene names from the AnnData object, trying multiple locations."""
-    # First try var_names directly
-    gene_names = adata.var_names.values.copy()
+def get_gene_names_from_adata(adata: ad.AnnData, use_raw: bool = False) -> np.ndarray:
+    """Extract gene names from the AnnData object, trying multiple locations.
+
+    When *use_raw* is True and ``adata.raw`` exists, gene names are taken from
+    the raw layer (which typically contains the full pre-HVG-filtering gene set).
+    """
+    if use_raw and adata.raw is not None:
+        gene_names = np.array(adata.raw.var_names)
+        var_df = adata.raw.var
+    else:
+        gene_names = adata.var_names.values.copy()
+        var_df = adata.var
 
     # Check if var_names look like Ensembl IDs; if so, look for a symbol column
     if len(gene_names) > 0 and str(gene_names[0]).startswith("ENSMUSG"):
         for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
-            if col in adata.var.columns:
-                gene_names = adata.var[col].values.copy()
+            if col in var_df.columns:
+                gene_names = var_df[col].values.copy()
                 break
 
     return gene_names
@@ -68,26 +76,36 @@ def match_genes(
     bactrap_df: pd.DataFrame,
     adata: ad.AnnData,
     gene_col: str = "gene_name",
-) -> Tuple[pd.DataFrame, List[str], Dict[str, int]]:
+) -> Tuple[pd.DataFrame, List[str], Dict[str, int], bool]:
     """
     Match bacTRAP gene symbols to HypoMap var_names.
+
+    When ``adata.raw`` exists the lookup is built from the **raw** layer so
+    that *all* genes are available for matching (not just the highly-variable
+    subset stored in ``adata.var``).
 
     Returns:
         bactrap_matched: subset of bactrap_df with matched genes
         matched_gene_names: list of matched gene symbols (as they appear in HypoMap)
-        gene_to_adata_idx: mapping from gene name to index in adata.var
+        gene_to_adata_idx: mapping from gene name to column index.
+            Indices are in **raw** space when ``adata.raw`` exists,
+            otherwise in ``adata.var`` space.
+        matched_in_raw: True when indices refer to adata.raw.var space.
     """
     if gene_col not in bactrap_df.columns:
         raise ValueError(f"Column '{gene_col}' not found in bacTRAP data.")
 
-    # Get gene names from HypoMap
-    adata_gene_names = get_gene_names_from_adata(adata)
+    # Match against the broadest available gene set (raw > var)
+    has_raw = adata.raw is not None
+    adata_gene_names = get_gene_names_from_adata(adata, use_raw=has_raw)
 
     # Build case-insensitive lookup: lowercase -> (original_name, index)
     adata_gene_lookup = {}
     for idx, name in enumerate(adata_gene_names):
         name_str = str(name).strip()
-        adata_gene_lookup[name_str.lower()] = (name_str, idx)
+        key = name_str.lower()
+        if key and key != "nan":
+            adata_gene_lookup[key] = (name_str, idx)
 
     # Match bacTRAP genes
     matched_rows = []
@@ -107,18 +125,25 @@ def match_genes(
     if len(matched_rows) == 0:
         empty_df = bactrap_df.iloc[:0].copy()
         empty_df["_hypomap_gene_name"] = pd.Series(dtype=str)
-        return empty_df, [], {}
+        return empty_df, [], {}, has_raw
 
     bactrap_matched = pd.DataFrame(matched_rows)
     bactrap_matched = bactrap_matched.reset_index(drop=True)
     bactrap_matched["_hypomap_gene_name"] = matched_gene_names
 
-    return bactrap_matched, matched_gene_names, gene_to_adata_idx
+    return bactrap_matched, matched_gene_names, gene_to_adata_idx, has_raw
 
 
-def _resolve_gene_names(adata: ad.AnnData, gene_indices: np.ndarray) -> List[str]:
-    """Resolve gene indices in adata.var to display names."""
-    adata_gene_names = get_gene_names_from_adata(adata)
+def _resolve_gene_names(
+    adata: ad.AnnData,
+    gene_indices: np.ndarray,
+    from_raw: bool = False,
+) -> List[str]:
+    """Resolve gene indices to display names.
+
+    When *from_raw* is True, indices are looked up in ``adata.raw.var``.
+    """
+    adata_gene_names = get_gene_names_from_adata(adata, use_raw=from_raw)
     return [str(adata_gene_names[i]) for i in gene_indices]
 
 
@@ -184,12 +209,16 @@ def _extract_gene_submatrix(
     adata: ad.AnnData,
     gene_indices: np.ndarray,
     use_raw: bool = True,
+    indices_in_raw: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract a dense (n_cells, n_genes) submatrix for the given gene indices.
 
-    gene_indices are always in adata.var space. When use_raw=True and
-    adata.raw exists, they are remapped to adata.raw.var space.
+    When *indices_in_raw* is False (legacy behaviour), gene_indices are in
+    adata.var space and are remapped to adata.raw.var when *use_raw* is True.
+
+    When *indices_in_raw* is True, gene_indices are already in adata.raw.var
+    space and no remapping is performed.
 
     Returns:
         X_sub: dense array of shape (n_cells, n_survived_genes)
@@ -198,7 +227,10 @@ def _extract_gene_submatrix(
     """
     survived_mask = np.ones(len(gene_indices), dtype=bool)
 
-    if use_raw and adata.raw is not None:
+    if indices_in_raw and adata.raw is not None:
+        # Indices already point into adata.raw.var — use directly
+        X = adata.raw.X
+    elif use_raw and adata.raw is not None:
         X = adata.raw.X
         raw_indices, survived_mask = _map_var_indices_to_raw(adata, gene_indices)
         gene_indices = raw_indices
@@ -256,12 +288,14 @@ def compute_cluster_mean_expression(
     annotation_col: str,
     min_cells: int = 10,
     use_raw: bool = True,
+    indices_in_raw: bool = False,
 ) -> pd.DataFrame:
     """
     Compute mean expression per cluster for a set of genes.
 
-    gene_indices refer to positions in adata.var. When use_raw=True,
-    they are remapped internally to adata.raw.var.
+    When *indices_in_raw* is False (legacy), gene_indices refer to
+    positions in ``adata.var`` and are remapped to ``adata.raw.var``
+    internally.  When True, they already point into ``adata.raw.var``.
 
     Returns a DataFrame with shape (n_survived_genes, n_clusters).
     """
@@ -272,7 +306,7 @@ def compute_cluster_mean_expression(
     valid_labels = unique_labels[counts >= min_cells]
 
     X_genes, survived_mask = _extract_gene_submatrix(
-        adata, gene_indices_arr, use_raw=use_raw,
+        adata, gene_indices_arr, use_raw=use_raw, indices_in_raw=indices_in_raw,
     )
 
     result = {}
@@ -281,7 +315,9 @@ def compute_cluster_mean_expression(
         result[str(label)] = X_genes[mask, :].mean(axis=0)
 
     # Use survived_mask to pick the correct gene names
-    gene_names = _resolve_gene_names(adata, gene_indices_arr[survived_mask])
+    gene_names = _resolve_gene_names(
+        adata, gene_indices_arr[survived_mask], from_raw=indices_in_raw,
+    )
     return pd.DataFrame(result, index=gene_names)
 
 
@@ -292,6 +328,7 @@ def compute_fraction_expressing(
     min_cells: int = 10,
     use_raw: bool = True,
     threshold: float = 0.0,
+    indices_in_raw: bool = False,
 ) -> pd.DataFrame:
     """
     Compute fraction of cells expressing each gene (>threshold) per cluster.
@@ -305,7 +342,7 @@ def compute_fraction_expressing(
     valid_labels = unique_labels[counts >= min_cells]
 
     X_genes, survived_mask = _extract_gene_submatrix(
-        adata, gene_indices_arr, use_raw=use_raw,
+        adata, gene_indices_arr, use_raw=use_raw, indices_in_raw=indices_in_raw,
     )
 
     result = {}
@@ -313,7 +350,9 @@ def compute_fraction_expressing(
         mask = labels == label
         result[str(label)] = (X_genes[mask, :] > threshold).mean(axis=0)
 
-    gene_names = _resolve_gene_names(adata, gene_indices_arr[survived_mask])
+    gene_names = _resolve_gene_names(
+        adata, gene_indices_arr[survived_mask], from_raw=indices_in_raw,
+    )
     return pd.DataFrame(result, index=gene_names)
 
 

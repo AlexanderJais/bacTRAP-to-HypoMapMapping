@@ -281,56 +281,37 @@ def compute_enrichment_score(
     use_raw: bool = True,
 ) -> np.ndarray:
     """
-    Compute a bacTRAP enrichment score for each cell using scanpy's score_genes.
+    Compute a bacTRAP enrichment score for each cell.
 
     This is a z-scored mean expression of the given gene set across all cells.
+    Gene lookup uses the **raw** layer when available so that all genes (not
+    just the HVG-filtered subset in ``adata.var``) are considered.
     """
-    # Find which genes are present in adata
-    adata_genes = get_gene_names_from_adata(adata)
-    adata_genes_lower = {str(g).lower(): str(g) for g in adata_genes}
-
-    present_genes = []
-    for g in gene_names:
-        g_lower = str(g).lower()
-        if g_lower in adata_genes_lower:
-            present_genes.append(adata_genes_lower[g_lower])
-
-    if len(present_genes) == 0:
-        return np.zeros(adata.n_obs)
-
-    # Use var_names as they appear in the adata
-    var_names_list = list(adata.var_names)
-    adata_gene_names_arr = get_gene_names_from_adata(adata)
-
-    # Map gene names to var_names indices
-    gene_name_to_var = {}
-    for i, (vn, gn) in enumerate(zip(var_names_list, adata_gene_names_arr)):
-        gene_name_to_var[str(gn).lower()] = vn
-
-    score_gene_list = []
-    for g in present_genes:
-        g_lower = g.lower()
-        if g_lower in gene_name_to_var:
-            score_gene_list.append(gene_name_to_var[g_lower])
-
-    if len(score_gene_list) == 0:
-        return np.zeros(adata.n_obs)
-
-    # Manual z-scored mean — avoids adata.copy() which doubles memory for
-    # the full atlas. sc.tl.score_genes requires a copy and uses more RAM
-    # than we can afford with a ~3.9GB object.
-    # Build index lookup for the correct expression source (var vs raw.var)
+    # Determine expression source
     if use_raw and adata.raw is not None:
         X = adata.raw.X
-        source_var_names = list(adata.raw.var_names)
+        source_gene_names = _get_raw_gene_names(adata)
     else:
         X = adata.X
-        source_var_names = var_names_list
+        source_gene_names = get_gene_names_from_adata(adata)
 
-    source_var_to_idx = {vn: i for i, vn in enumerate(source_var_names)}
-    gene_idx = [source_var_to_idx[g] for g in score_gene_list if g in source_var_to_idx]
+    # Build case-insensitive lookup: gene symbol -> column index
+    gene_lower_to_idx = {}
+    for i, g in enumerate(source_gene_names):
+        key = str(g).strip().lower()
+        if key and key != "nan":
+            gene_lower_to_idx[key] = i
+
+    # Map input genes to expression matrix column indices
+    gene_idx = []
+    for g in gene_names:
+        g_lower = str(g).strip().lower()
+        if g_lower in gene_lower_to_idx:
+            gene_idx.append(gene_lower_to_idx[g_lower])
+
     if len(gene_idx) == 0:
         return np.zeros(adata.n_obs)
+
     X_sub = X[:, gene_idx]
     if sparse.issparse(X_sub):
         X_sub = np.asarray(X_sub.toarray())
