@@ -56,6 +56,17 @@ def compute_enrichment_correlation(
     enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
     expr_sub = cluster_mean_expr.loc[common]
 
+    # Remove genes with NaN enrichment values (e.g. NaN log2FoldChange)
+    valid_mask = np.isfinite(enrichment)
+    if not np.all(valid_mask):
+        enrichment = enrichment[valid_mask]
+        expr_sub = expr_sub.iloc[valid_mask]
+    if len(enrichment) < 3:
+        return pd.DataFrame(columns=[
+            "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
+            "n_genes",
+        ])
+
     results = []
     for cluster in expr_sub.columns:
         cluster_expr = expr_sub[cluster].values.astype(float)
@@ -75,7 +86,7 @@ def compute_enrichment_correlation(
             "pearson_pval": pp,
             "spearman_r": sr,
             "spearman_pval": sp,
-            "n_genes": len(common),
+            "n_genes": len(enrichment),
         })
 
     df = pd.DataFrame(results)
@@ -151,13 +162,24 @@ def compute_marker_genes(
         use_raw=False,
     )
 
+    # Build a var_name -> gene_symbol mapping so that returned marker names
+    # are gene symbols (matching how match_genes identifies genes), not
+    # Ensembl IDs which adata_work.var_names may contain when built from raw.
+    work_gene_names = get_gene_names_from_adata(adata_work)
+    varname_to_symbol = {}
+    for vn, gn in zip(adata_work.var_names, work_gene_names):
+        varname_to_symbol[str(vn)] = str(gn)
+
     markers = {}
     for cluster in valid_clusters:
         try:
-            gene_names = sc.get.rank_genes_groups_df(
+            raw_names = sc.get.rank_genes_groups_df(
                 adata_work, group=str(cluster)
             )["names"].tolist()[:n_genes]
-            markers[str(cluster)] = gene_names
+            # Convert var_names to gene symbols where possible
+            markers[str(cluster)] = [
+                varname_to_symbol.get(g, g) for g in raw_names
+            ]
         except Exception:
             continue
 
@@ -206,6 +228,8 @@ def fisher_overlap_test(
 
     enriched_set = set(g.lower() for g in enriched_genes)
     n_enriched = len(enriched_set)
+    # Build case-mapping once outside the loop
+    enriched_original = {g.lower(): g for g in enriched_genes}
 
     results = []
     for cluster, markers in cluster_markers.items():
@@ -216,9 +240,6 @@ def fisher_overlap_test(
         n_overlap = len(overlap)
 
         # Contingency table for Fisher's exact test
-        #                 In markers    Not in markers
-        # Enriched        n_overlap     n_enriched - n_overlap
-        # Not enriched    n_markers - n_overlap   universe - n_enriched - n_markers + n_overlap
         a = n_overlap
         b = n_enriched - n_overlap
         c = n_markers - n_overlap
@@ -227,8 +248,6 @@ def fisher_overlap_test(
         table = np.array([[a, b], [c, d]])
         odds_ratio, pvalue = stats.fisher_exact(table, alternative="greater")
 
-        # Map back to original case for overlap genes
-        enriched_original = {g.lower(): g for g in enriched_genes}
         overlap_names = sorted([enriched_original.get(g, g) for g in overlap])
 
         results.append({

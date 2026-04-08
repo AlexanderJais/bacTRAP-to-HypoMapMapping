@@ -125,7 +125,7 @@ def _resolve_gene_names(adata: ad.AnnData, gene_indices: np.ndarray) -> List[str
 def _map_var_indices_to_raw(
     adata: ad.AnnData,
     gene_indices: np.ndarray,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Map gene indices from adata.var space to adata.raw.var space.
 
@@ -133,54 +133,77 @@ def _map_var_indices_to_raw(
     indices into adata.var do NOT correspond to the same columns in
     adata.raw.X. This function translates them via gene name lookup.
 
-    Returns an array of indices into adata.raw.var. Genes not found in
-    raw are dropped (returns a shorter array).
+    Returns:
+        raw_indices: array of indices into adata.raw.var
+        survived_mask: boolean mask over gene_indices indicating which
+            original indices were successfully mapped (for correct label alignment)
     """
     if adata.raw is None:
-        return gene_indices
+        return gene_indices, np.ones(len(gene_indices), dtype=bool)
 
     # Get gene names for the requested indices in adata.var
     var_gene_names = get_gene_names_from_adata(adata)
     query_names = [str(var_gene_names[i]).lower() for i in gene_indices]
 
-    # Build lookup for raw var names
+    # Build lookup for raw var names — prefer gene symbols over Ensembl IDs
+    # so that the lookup matches how match_genes() found these genes.
     raw_var_names = adata.raw.var_names
     raw_lookup = {}
+
+    # First pass: raw var_names (may be Ensembl IDs or symbols)
     for i, name in enumerate(raw_var_names):
         raw_lookup[str(name).lower()] = i
 
-    # If raw var_names are Ensembl IDs, also check gene symbol columns
+    # Second pass: if raw var_names are Ensembl IDs, add gene symbol entries.
+    # Gene symbols take precedence (overwrite) since queries use symbols.
     if len(raw_var_names) > 0 and str(raw_var_names[0]).startswith("ENSMUSG"):
         for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
             if col in adata.raw.var.columns:
                 for i, name in enumerate(adata.raw.var[col]):
-                    raw_lookup[str(name).lower()] = i
+                    name_lower = str(name).strip().lower()
+                    if name_lower and name_lower != "nan":
+                        raw_lookup[name_lower] = i
                 break
 
     raw_indices = []
-    for name in query_names:
+    survived = []
+    for j, name in enumerate(query_names):
         if name in raw_lookup:
             raw_indices.append(raw_lookup[name])
-    return np.array(raw_indices, dtype=int)
+            survived.append(True)
+        else:
+            survived.append(False)
+
+    return (
+        np.array(raw_indices, dtype=int),
+        np.array(survived, dtype=bool),
+    )
 
 
 def _extract_gene_submatrix(
     adata: ad.AnnData,
     gene_indices: np.ndarray,
     use_raw: bool = True,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Extract a dense (n_cells, n_genes) submatrix for the given gene indices.
 
     gene_indices are always in adata.var space. When use_raw=True and
-    adata.raw exists, they are remapped to adata.raw.var space so that
-    the correct columns are extracted from the raw expression matrix.
+    adata.raw exists, they are remapped to adata.raw.var space.
+
+    Returns:
+        X_sub: dense array of shape (n_cells, n_survived_genes)
+        survived_mask: boolean mask over gene_indices indicating which
+            genes were successfully extracted (True = present in output)
     """
+    survived_mask = np.ones(len(gene_indices), dtype=bool)
+
     if use_raw and adata.raw is not None:
         X = adata.raw.X
-        # Remap indices from adata.var space to adata.raw.var space
         if X.shape[1] != adata.X.shape[1]:
-            gene_indices = _map_var_indices_to_raw(adata, gene_indices)
+            raw_indices, survived_mask = _map_var_indices_to_raw(adata, gene_indices)
+            gene_indices = raw_indices
+        # else: same shape, indices are directly usable
     else:
         X = adata.X
 
@@ -188,22 +211,31 @@ def _extract_gene_submatrix(
     n_genes = len(gene_indices)
 
     if n_genes == 0:
-        return np.empty((n_cells, 0), dtype=np.float32)
+        return np.empty((n_cells, 0), dtype=np.float32), survived_mask
 
     # Validate indices are within bounds
     max_idx = X.shape[1]
-    gene_indices = gene_indices[gene_indices < max_idx]
-    n_genes = len(gene_indices)
+    valid = gene_indices < max_idx
+    if not np.all(valid):
+        gene_indices = gene_indices[valid]
+        # Update survived_mask: mark out-of-bounds as not survived
+        survived_positions = np.where(survived_mask)[0]
+        for pos, is_valid in zip(survived_positions, valid):
+            if not is_valid:
+                survived_mask[pos] = False
+        n_genes = len(gene_indices)
 
     if n_genes == 0:
-        return np.empty((n_cells, 0), dtype=np.float32)
+        return np.empty((n_cells, 0), dtype=np.float32), survived_mask
 
     # For small gene sets, direct column slicing is fine
     if n_genes <= 500:
         X_sub = X[:, gene_indices]
         if sparse.issparse(X_sub):
-            return np.asarray(X_sub.toarray())
-        return np.asarray(X_sub)
+            result = np.asarray(X_sub.toarray())
+        else:
+            result = np.asarray(X_sub)
+        return result, survived_mask
 
     # For larger sets, process in chunks to limit peak memory
     chunk_size = 200
@@ -216,7 +248,7 @@ def _extract_gene_submatrix(
             out[:, start:end] = np.asarray(X_chunk.toarray())
         else:
             out[:, start:end] = np.asarray(X_chunk)
-    return out
+    return out, survived_mask
 
 
 def compute_cluster_mean_expression(
@@ -232,7 +264,7 @@ def compute_cluster_mean_expression(
     gene_indices refer to positions in adata.var. When use_raw=True,
     they are remapped internally to adata.raw.var.
 
-    Returns a DataFrame with shape (n_genes, n_clusters).
+    Returns a DataFrame with shape (n_survived_genes, n_clusters).
     """
     gene_indices_arr = np.array(gene_indices)
     labels = adata.obs[annotation_col].values
@@ -240,17 +272,17 @@ def compute_cluster_mean_expression(
     unique_labels, counts = np.unique(labels, return_counts=True)
     valid_labels = unique_labels[counts >= min_cells]
 
-    X_genes = _extract_gene_submatrix(adata, gene_indices_arr, use_raw=use_raw)
+    X_genes, survived_mask = _extract_gene_submatrix(
+        adata, gene_indices_arr, use_raw=use_raw,
+    )
 
     result = {}
     for label in valid_labels:
         mask = labels == label
         result[str(label)] = X_genes[mask, :].mean(axis=0)
 
-    gene_names = _resolve_gene_names(adata, gene_indices_arr)
-    # Handle case where raw mapping dropped some genes
-    if len(gene_names) != X_genes.shape[1]:
-        gene_names = gene_names[:X_genes.shape[1]]
+    # Use survived_mask to pick the correct gene names
+    gene_names = _resolve_gene_names(adata, gene_indices_arr[survived_mask])
     return pd.DataFrame(result, index=gene_names)
 
 
@@ -265,7 +297,7 @@ def compute_fraction_expressing(
     """
     Compute fraction of cells expressing each gene (>threshold) per cluster.
 
-    Returns a DataFrame with shape (n_genes, n_clusters).
+    Returns a DataFrame with shape (n_survived_genes, n_clusters).
     """
     gene_indices_arr = np.array(gene_indices)
     labels = adata.obs[annotation_col].values
@@ -273,24 +305,16 @@ def compute_fraction_expressing(
     unique_labels, counts = np.unique(labels, return_counts=True)
     valid_labels = unique_labels[counts >= min_cells]
 
-    X_genes = _extract_gene_submatrix(adata, gene_indices_arr, use_raw=use_raw)
+    X_genes, survived_mask = _extract_gene_submatrix(
+        adata, gene_indices_arr, use_raw=use_raw,
+    )
 
     result = {}
     for label in valid_labels:
         mask = labels == label
         result[str(label)] = (X_genes[mask, :] > threshold).mean(axis=0)
 
-    gene_names = _resolve_gene_names(adata, gene_indices_arr)
-    if len(gene_names) != X_genes.shape[1]:
-        gene_names = gene_names[:X_genes.shape[1]]
+    gene_names = _resolve_gene_names(adata, gene_indices_arr[survived_mask])
     return pd.DataFrame(result, index=gene_names)
 
 
-def subsample_adata(adata: ad.AnnData, n_cells: int = 50000, seed: int = 42) -> ad.AnnData:
-    """Subsample cells from AnnData for efficient visualization."""
-    if adata.n_obs <= n_cells:
-        return adata
-    rng = np.random.default_rng(seed)
-    idx = rng.choice(adata.n_obs, size=n_cells, replace=False)
-    idx.sort()
-    return adata[idx].copy()

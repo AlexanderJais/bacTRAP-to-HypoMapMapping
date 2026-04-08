@@ -7,6 +7,9 @@ murine HypoMap single-cell atlas (Steuernagel et al., Nature Metabolism 2022).
 Run with: streamlit run app.py
 """
 
+import io
+import zipfile
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -602,7 +605,6 @@ if run_button or st.session_state.analysis_done:
         # Build ZIP from cached figure bytes (no regeneration needed)
         cached_bytes = st.session_state.get("fig_bytes", {})
         if cached_bytes:
-            import io, zipfile
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for name, fmt_dict in cached_bytes.items():

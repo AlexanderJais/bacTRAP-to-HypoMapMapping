@@ -120,7 +120,7 @@ def figure_correlation_barplot(
         vmin=min(df["spearman_r"].min(), 0),
         vmax=df["spearman_r"].max(),
     )
-    cmap = cm.get_cmap("viridis")
+    cmap = plt.colormaps["viridis"]
     colors = [cmap(norm(v)) for v in df["spearman_r"]]
 
     bars = ax.barh(
