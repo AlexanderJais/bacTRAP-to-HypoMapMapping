@@ -875,6 +875,188 @@ def figure_aucell_umap(
 
 
 # ---------------------------------------------------------------------------
+# Figure I-2: AUCell Cluster Barplot
+# ---------------------------------------------------------------------------
+
+def figure_aucell_cluster_barplot(
+    aucell_scores: np.ndarray,
+    cell_labels: np.ndarray,
+    top_n: int = 25,
+    double_column: bool = False,
+) -> plt.Figure:
+    """Horizontal barplot of mean AUCell score per cluster, ranked."""
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    # Compute mean AUCell score per cluster
+    df = pd.DataFrame({"score": aucell_scores, "cluster": cell_labels})
+    cluster_stats = df.groupby("cluster")["score"].agg(["mean", "std", "count"])
+    cluster_stats = cluster_stats.sort_values("mean", ascending=False)
+    cluster_stats = cluster_stats.head(top_n).iloc[::-1]  # reverse for bottom-to-top
+
+    if len(cluster_stats) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
+    n_bars = len(cluster_stats)
+    height = max(width * 0.6, n_bars * 0.18 + 0.8)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    # Color by score
+    norm = Normalize(vmin=0, vmax=cluster_stats["mean"].max())
+    cmap = plt.colormaps["magma"]
+    colors = [cmap(norm(v)) for v in cluster_stats["mean"]]
+
+    ax.barh(
+        range(n_bars),
+        cluster_stats["mean"],
+        xerr=cluster_stats["std"] / np.sqrt(cluster_stats["count"]),  # SEM
+        color=colors,
+        edgecolor="none",
+        height=0.7,
+        capsize=1.5,
+        error_kw={"linewidth": 0.5},
+    )
+
+    for i, (_, row) in enumerate(cluster_stats.iterrows()):
+        ax.text(row["mean"] + cluster_stats["mean"].max() * 0.02, i,
+                f"{row['mean']:.4f}", va="center", ha="left", fontsize=5)
+
+    ax.set_yticks(range(n_bars))
+    ax.set_yticklabels(cluster_stats.index, fontsize=6)
+    ax.set_xlabel("Mean AUCell score")
+    ax.set_title("AUCell enrichment per cluster (top %d)" % top_n)
+
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.6, aspect=20, pad=0.02)
+    cbar.set_label("AUCell score", fontsize=6)
+    cbar.ax.tick_params(labelsize=5)
+
+    logger.info("figure_aucell_cluster_barplot: %d clusters, top=%s (%.4f)",
+                n_bars, cluster_stats.index[-1], cluster_stats["mean"].iloc[-1])
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure I-3: AUCell Violin Plot (top clusters)
+# ---------------------------------------------------------------------------
+
+def figure_aucell_violins(
+    aucell_scores: np.ndarray,
+    cell_labels: np.ndarray,
+    top_n: int = 15,
+    double_column: bool = True,
+) -> plt.Figure:
+    """Violin plots of AUCell score distributions for top clusters."""
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    df = pd.DataFrame({"score": aucell_scores, "cluster": cell_labels})
+    cluster_means = df.groupby("cluster")["score"].mean().sort_values(ascending=False)
+    top_clusters = cluster_means.head(top_n).index.tolist()
+    df_top = df[df["cluster"].isin(top_clusters)].copy()
+
+    if len(df_top) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No data available", ha="center", va="center",
+                transform=ax.transAxes)
+        return fig
+
+    # Order by mean score (descending)
+    df_top["cluster"] = pd.Categorical(df_top["cluster"], categories=top_clusters, ordered=True)
+
+    height = max(width * 0.5, 3.5)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    parts = ax.violinplot(
+        [df_top.loc[df_top["cluster"] == c, "score"].values for c in top_clusters],
+        positions=range(len(top_clusters)),
+        vert=False,
+        showmeans=True,
+        showmedians=True,
+        showextrema=False,
+    )
+
+    # Style violins
+    cmap = plt.colormaps["magma"]
+    norm = Normalize(vmin=0, vmax=cluster_means.iloc[0])
+    for i, body in enumerate(parts["bodies"]):
+        body.set_facecolor(cmap(norm(cluster_means.iloc[i])))
+        body.set_alpha(0.7)
+        body.set_edgecolor("grey")
+        body.set_linewidth(0.5)
+    if "cmeans" in parts:
+        parts["cmeans"].set_linewidth(0.8)
+        parts["cmeans"].set_color("black")
+    if "cmedians" in parts:
+        parts["cmedians"].set_linewidth(0.5)
+        parts["cmedians"].set_color("grey")
+        parts["cmedians"].set_linestyle("--")
+
+    ax.set_yticks(range(len(top_clusters)))
+    ax.set_yticklabels(top_clusters, fontsize=6)
+    ax.set_xlabel("AUCell score")
+    ax.set_title("AUCell score distribution (top %d clusters)" % top_n)
+
+    logger.info("figure_aucell_violins: %d clusters shown", len(top_clusters))
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure I-4: AUCell Score Histogram
+# ---------------------------------------------------------------------------
+
+def figure_aucell_histogram(
+    aucell_scores: np.ndarray,
+    double_column: bool = False,
+) -> plt.Figure:
+    """Histogram of AUCell scores across all cells, with percentile markers."""
+    setup_nature_style()
+    width = get_figure_width(double_column)
+    fig, ax = plt.subplots(figsize=(width, width * 0.6))
+
+    # Remove zero scores for cleaner visualization
+    nonzero = aucell_scores[aucell_scores > 0]
+    all_scores = aucell_scores
+
+    ax.hist(all_scores, bins=100, color="steelblue", edgecolor="none",
+            alpha=0.8, density=True)
+
+    # Mark percentiles
+    for pct, ls, lbl in [(90, "--", "90th"), (95, "-.", "95th"), (99, ":", "99th")]:
+        val = np.percentile(all_scores, pct)
+        ax.axvline(val, color="firebrick", linestyle=ls, linewidth=0.8, alpha=0.8)
+        ax.text(val, ax.get_ylim()[1] * 0.95, f" {lbl}\n {val:.4f}",
+                fontsize=5, color="firebrick", va="top")
+
+    mean_val = np.mean(all_scores)
+    ax.axvline(mean_val, color="black", linestyle="-", linewidth=0.8)
+    ax.text(mean_val, ax.get_ylim()[1] * 0.80, f" mean\n {mean_val:.4f}",
+            fontsize=5, color="black", va="top")
+
+    ax.set_xlabel("AUCell score")
+    ax.set_ylabel("Density")
+    ax.set_title("AUCell score distribution (all cells)")
+
+    n_zero = int((all_scores == 0).sum())
+    n_total = len(all_scores)
+    ax.text(0.98, 0.98,
+            f"n = {n_total:,}\nzero = {n_zero:,} ({100*n_zero/n_total:.1f}%)",
+            transform=ax.transAxes, fontsize=5, va="top", ha="right",
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="grey", alpha=0.8))
+
+    logger.info("figure_aucell_histogram: %d cells, mean=%.4f, 95th=%.4f",
+                n_total, mean_val, np.percentile(all_scores, 95))
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Figure J: Composite Ranking Heatmap
 # ---------------------------------------------------------------------------
 

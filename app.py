@@ -186,6 +186,9 @@ from figures import (
     figure_gsea_curves,
     figure_gsea_barplot,
     figure_aucell_umap,
+    figure_aucell_cluster_barplot,
+    figure_aucell_violins,
+    figure_aucell_histogram,
     fig_to_bytes,
 )
 
@@ -334,7 +337,9 @@ if run_button or st.session_state.analysis_done:
         progress.progress(30, text="Computing enrichment correlation...")
 
         # ---- Correlation analysis ----
-        corr_df = compute_enrichment_correlation(bactrap_matched, cluster_mean_expr)
+        # Use only enriched genes (positive FC + significant padj) — negative FC
+        # genes are from non-target cell populations and would dilute the signal.
+        corr_df = compute_enrichment_correlation(enriched_df, cluster_mean_expr)
         progress.progress(30, text="Computing marker gene overlap...")
 
         # ---- Marker gene overlap ----
@@ -408,7 +413,9 @@ if run_button or st.session_state.analysis_done:
         progress.progress(60, text="Running NNLS deconvolution...")
 
         # ---- NNLS deconvolution ----
-        nnls_df = compute_nnls_deconvolution(bactrap_matched, cluster_mean_expr)
+        # Use only enriched genes — negative FC genes from non-target populations
+        # would distort the deconvolution by fitting against unwanted signal.
+        nnls_df = compute_nnls_deconvolution(enriched_df, cluster_mean_expr)
 
         progress.progress(65, text="Running GSEA enrichment...")
 
@@ -1021,39 +1028,134 @@ if run_button or st.session_state.analysis_done:
         else:
             st.warning("No GSEA results to display.")
 
-        # AUCell UMAP — rendered independently of GSEA results since
+        # AUCell — rendered independently of GSEA results since
         # AUCell scoring is computed from the enriched gene set directly.
         st.markdown("---")
-        st.subheader("Figure I: AUCell Enrichment UMAP")
+        st.subheader("AUCell Analysis")
         st.markdown(
             "AUCell (rank-based Area Under the Curve) scores per cell — "
             "more robust than mean expression because it's rank-based and "
-            "threshold-free."
+            "threshold-free. Scores are computed from the top "
+            f"**{len(top_enriched_genes)}** enriched genes."
         )
-        fig_i = figure_aucell_umap(
+
+        # I-1: UMAP
+        st.subheader("Figure I-1: AUCell Enrichment UMAP")
+        fig_i1 = figure_aucell_umap(
             umap_coords, aucell_scores,
             double_column=double_column,
             subsample_idx=sub_indices,
         )
-        st.pyplot(fig_i)
-        _cache_fig("fig_i_aucell_umap", fig_i)
+        st.pyplot(fig_i1)
+        _cache_fig("fig_i1_aucell_umap", fig_i1)
 
         col_pdf, col_svg = st.columns(2)
         with col_pdf:
             st.download_button(
                 "Download PDF",
-                st.session_state.fig_bytes["fig_i_aucell_umap"]["pdf"],
-                "fig_i_aucell_umap.pdf", "application/pdf",
-                key="dl_fig_i_pdf",
+                st.session_state.fig_bytes["fig_i1_aucell_umap"]["pdf"],
+                "fig_i1_aucell_umap.pdf", "application/pdf",
+                key="dl_fig_i1_pdf",
             )
         with col_svg:
             st.download_button(
                 "Download SVG",
-                st.session_state.fig_bytes["fig_i_aucell_umap"]["svg"],
-                "fig_i_aucell_umap.svg", "image/svg+xml",
-                key="dl_fig_i_svg",
+                st.session_state.fig_bytes["fig_i1_aucell_umap"]["svg"],
+                "fig_i1_aucell_umap.svg", "image/svg+xml",
+                key="dl_fig_i1_svg",
             )
-        plt.close(fig_i)
+        plt.close(fig_i1)
+
+        # I-2: Cluster barplot
+        st.subheader("Figure I-2: AUCell Score per Cluster")
+        st.markdown(
+            "Mean AUCell score per cluster (error bars = SEM). "
+            "Clusters where cells consistently express the enriched gene set "
+            "rank highest."
+        )
+        fig_i2 = figure_aucell_cluster_barplot(
+            aucell_scores, cell_labels,
+            top_n=25, double_column=double_column,
+        )
+        st.pyplot(fig_i2)
+        _cache_fig("fig_i2_aucell_barplot", fig_i2)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_i2_aucell_barplot"]["pdf"],
+                "fig_i2_aucell_barplot.pdf", "application/pdf",
+                key="dl_fig_i2_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_i2_aucell_barplot"]["svg"],
+                "fig_i2_aucell_barplot.svg", "image/svg+xml",
+                key="dl_fig_i2_svg",
+            )
+        plt.close(fig_i2)
+
+        # I-3: Violin plots
+        st.subheader("Figure I-3: AUCell Score Distributions (Top Clusters)")
+        st.markdown(
+            "Violin plots showing the full distribution of AUCell scores within "
+            "each top-ranked cluster. Solid line = mean, dashed = median."
+        )
+        fig_i3 = figure_aucell_violins(
+            aucell_scores, cell_labels,
+            top_n=15, double_column=True,
+        )
+        st.pyplot(fig_i3)
+        _cache_fig("fig_i3_aucell_violins", fig_i3)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_i3_aucell_violins"]["pdf"],
+                "fig_i3_aucell_violins.pdf", "application/pdf",
+                key="dl_fig_i3_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_i3_aucell_violins"]["svg"],
+                "fig_i3_aucell_violins.svg", "image/svg+xml",
+                key="dl_fig_i3_svg",
+            )
+        plt.close(fig_i3)
+
+        # I-4: Score histogram
+        st.subheader("Figure I-4: AUCell Score Distribution (All Cells)")
+        st.markdown(
+            "Global distribution of AUCell scores with percentile markers. "
+            "Cells above the 95th percentile are most likely part of the "
+            "bacTRAP target population."
+        )
+        fig_i4 = figure_aucell_histogram(
+            aucell_scores, double_column=double_column,
+        )
+        st.pyplot(fig_i4)
+        _cache_fig("fig_i4_aucell_histogram", fig_i4)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_i4_aucell_histogram"]["pdf"],
+                "fig_i4_aucell_histogram.pdf", "application/pdf",
+                key="dl_fig_i4_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_i4_aucell_histogram"]["svg"],
+                "fig_i4_aucell_histogram.svg", "image/svg+xml",
+                key="dl_fig_i4_svg",
+            )
+        plt.close(fig_i4)
 
     # ======================================================================
     # TAB 8: Export
