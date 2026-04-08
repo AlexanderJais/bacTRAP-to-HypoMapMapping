@@ -1,0 +1,215 @@
+"""
+Data loading and gene matching utilities for bacTRAP-to-HypoMap mapping.
+"""
+
+import pandas as pd
+import numpy as np
+import scanpy as sc
+import anndata as ad
+import streamlit as st
+from scipy import sparse
+from typing import Tuple, Optional, Dict, List
+
+
+@st.cache_resource(show_spinner="Loading HypoMap atlas (this may take a few minutes)...")
+def load_hypomap(file_path: str) -> ad.AnnData:
+    """Load the HypoMap h5ad atlas with memory-efficient settings."""
+    adata = sc.read_h5ad(file_path, backed=None)
+    # Ensure expression matrix is sparse
+    if not sparse.issparse(adata.X):
+        adata.X = sparse.csr_matrix(adata.X)
+    if adata.raw is not None and not sparse.issparse(adata.raw.X):
+        adata.raw._X = sparse.csr_matrix(adata.raw.X)
+    return adata
+
+
+@st.cache_data(show_spinner="Loading bacTRAP data...")
+def load_bactrap(file_path: str) -> pd.DataFrame:
+    """Load the bacTRAP FPKM/DESeq2 results from an Excel file."""
+    df = pd.read_excel(file_path, engine="openpyxl")
+    return df
+
+
+def get_annotation_columns(adata: ad.AnnData) -> List[str]:
+    """Return candidate annotation columns from .obs (categorical or string dtypes)."""
+    candidates = []
+    for col in adata.obs.columns:
+        dtype = adata.obs[col].dtype
+        if dtype.name == "category" or dtype == object:
+            nunique = adata.obs[col].nunique()
+            # Likely an annotation if it has a reasonable number of unique values
+            if 2 <= nunique <= 5000:
+                candidates.append(col)
+    return sorted(candidates)
+
+
+def get_gene_names_from_adata(adata: ad.AnnData) -> np.ndarray:
+    """Extract gene names from the AnnData object, trying multiple locations."""
+    # First try var_names directly
+    gene_names = adata.var_names.values.copy()
+
+    # Check if var_names look like Ensembl IDs; if so, look for a symbol column
+    if len(gene_names) > 0 and str(gene_names[0]).startswith("ENSMUSG"):
+        for col in ["gene_name", "gene_symbol", "symbol", "Gene", "gene_short_name"]:
+            if col in adata.var.columns:
+                gene_names = adata.var[col].values.copy()
+                break
+
+    return gene_names
+
+
+def match_genes(
+    bactrap_df: pd.DataFrame,
+    adata: ad.AnnData,
+    gene_col: str = "gene_name",
+) -> Tuple[pd.DataFrame, List[str], Dict[str, int]]:
+    """
+    Match bacTRAP gene symbols to HypoMap var_names.
+
+    Returns:
+        bactrap_matched: subset of bactrap_df with matched genes
+        matched_gene_names: list of matched gene symbols (as they appear in HypoMap)
+        gene_to_adata_idx: mapping from gene name to index in adata.var
+    """
+    if gene_col not in bactrap_df.columns:
+        raise ValueError(f"Column '{gene_col}' not found in bacTRAP data.")
+
+    # Get gene names from HypoMap
+    adata_gene_names = get_gene_names_from_adata(adata)
+
+    # Build case-insensitive lookup: lowercase -> (original_name, index)
+    adata_gene_lookup = {}
+    for idx, name in enumerate(adata_gene_names):
+        name_str = str(name).strip()
+        adata_gene_lookup[name_str.lower()] = (name_str, idx)
+
+    # Match bacTRAP genes
+    matched_rows = []
+    matched_gene_names = []
+    gene_to_adata_idx = {}
+
+    for _, row in bactrap_df.iterrows():
+        bt_gene = str(row[gene_col]).strip()
+        bt_gene_lower = bt_gene.lower()
+
+        if bt_gene_lower in adata_gene_lookup:
+            original_name, adata_idx = adata_gene_lookup[bt_gene_lower]
+            matched_rows.append(row)
+            matched_gene_names.append(original_name)
+            gene_to_adata_idx[original_name] = adata_idx
+
+    bactrap_matched = pd.DataFrame(matched_rows)
+    bactrap_matched = bactrap_matched.reset_index(drop=True)
+    bactrap_matched["_hypomap_gene_name"] = matched_gene_names
+
+    return bactrap_matched, matched_gene_names, gene_to_adata_idx
+
+
+def compute_cluster_mean_expression(
+    adata: ad.AnnData,
+    gene_indices: List[int],
+    annotation_col: str,
+    min_cells: int = 10,
+    use_raw: bool = True,
+) -> pd.DataFrame:
+    """
+    Compute mean expression per cluster for a set of genes.
+
+    Returns a DataFrame with shape (n_genes, n_clusters).
+    """
+    # Select expression source
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+        var_names = adata.raw.var_names
+    else:
+        X = adata.X
+        var_names = adata.var_names
+
+    gene_indices_arr = np.array(gene_indices)
+    labels = adata.obs[annotation_col].values
+
+    # Get unique clusters meeting minimum cell count
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    valid_mask = counts >= min_cells
+    valid_labels = unique_labels[valid_mask]
+
+    # Extract submatrix for genes of interest
+    X_genes = X[:, gene_indices_arr]
+    if sparse.issparse(X_genes):
+        X_genes_dense = np.asarray(X_genes.todense())
+    else:
+        X_genes_dense = np.asarray(X_genes)
+
+    # Compute means per cluster
+    result = {}
+    for label in valid_labels:
+        mask = labels == label
+        cluster_expr = X_genes_dense[mask, :]
+        result[str(label)] = cluster_expr.mean(axis=0)
+
+    gene_names_for_idx = []
+    raw_var_names = adata.raw.var_names if (use_raw and adata.raw is not None) else adata.var_names
+    adata_gene_names = get_gene_names_from_adata(adata)
+    # Use the same gene names we used for matching
+    for idx in gene_indices_arr:
+        if idx < len(adata_gene_names):
+            gene_names_for_idx.append(str(adata_gene_names[idx]))
+        else:
+            gene_names_for_idx.append(str(raw_var_names[idx]))
+
+    df = pd.DataFrame(result, index=gene_names_for_idx)
+    return df
+
+
+def compute_fraction_expressing(
+    adata: ad.AnnData,
+    gene_indices: List[int],
+    annotation_col: str,
+    min_cells: int = 10,
+    use_raw: bool = True,
+    threshold: float = 0.0,
+) -> pd.DataFrame:
+    """
+    Compute fraction of cells expressing each gene (>threshold) per cluster.
+
+    Returns a DataFrame with shape (n_genes, n_clusters).
+    """
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+    else:
+        X = adata.X
+
+    gene_indices_arr = np.array(gene_indices)
+    labels = adata.obs[annotation_col].values
+
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    valid_mask = counts >= min_cells
+    valid_labels = unique_labels[valid_mask]
+
+    X_genes = X[:, gene_indices_arr]
+    if sparse.issparse(X_genes):
+        X_genes_dense = np.asarray(X_genes.todense())
+    else:
+        X_genes_dense = np.asarray(X_genes)
+
+    result = {}
+    for label in valid_labels:
+        mask = labels == label
+        cluster_expr = X_genes_dense[mask, :]
+        result[str(label)] = (cluster_expr > threshold).mean(axis=0)
+
+    adata_gene_names = get_gene_names_from_adata(adata)
+    gene_names_for_idx = [str(adata_gene_names[i]) for i in gene_indices_arr]
+
+    df = pd.DataFrame(result, index=gene_names_for_idx)
+    return df
+
+
+def subsample_adata(adata: ad.AnnData, n_cells: int = 50000, seed: int = 42) -> ad.AnnData:
+    """Subsample cells from AnnData for efficient visualization."""
+    if adata.n_obs <= n_cells:
+        return adata
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(adata.n_obs, size=n_cells, replace=False)
+    idx.sort()
+    return adata[idx].copy()
