@@ -81,12 +81,13 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 | Tab | Contents |
 |---|---|
 | **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, bacTRAP volcano plot, gene matching diagnostics |
-| **Correlation** | Ranked cluster table + correlation barplot |
-| **UMAP Projection** | Two-panel UMAP: cell types + enrichment score |
-| **Marker Overlap** | Fisher's test table + dot plot + Fisher volcano plot |
-| **Heatmap** | Z-scored heatmap of top genes across top clusters |
-| **NNLS Deconvolution** | NNLS weights table + weight barplot |
-| **GSEA** | GSEA results table + enrichment curves + NES barplot + AUCell UMAP |
+| **AUCell (Main Figure)** | Main Figure 1a-1e: AUCell UMAP, per-cluster barplot, violin distributions, score histogram, and composite consensus ranking |
+| **Correlation (Suppl.)** | Ranked cluster table + correlation barplot (Supplementary Figure S1) |
+| **UMAP Projection (Suppl.)** | Two-panel UMAP: cell types + enrichment score (Supplementary Figure S2) |
+| **Marker Overlap (Suppl.)** | Fisher's test table + Fisher volcano plot + dot plot (Supplementary Figures S3, S4) |
+| **Heatmap (Suppl.)** | Z-scored heatmap of top genes across top clusters (Supplementary Figure S5) |
+| **NNLS (Suppl.)** | NNLS weights table + weight barplot (Supplementary Figure S6) |
+| **GSEA (Suppl.)** | GSEA results table + enrichment curves + NES barplot (Supplementary Figures S7, S8) |
 | **Export** | Download all figures (ZIP of PDF+SVG), all result tables (CSV), and diagnostic log file |
 
 ---
@@ -174,18 +175,29 @@ All figures follow Nature journal specifications:
 
 ### Figure Descriptions
 
+**Main Figure 1 — AUCell cell-type mapping** (rank-based, normalization-insensitive, threshold-free; the primary mapping method):
+
+| Panel | Type | Description |
+|---|---|---|
+| **1a** | UMAP | AUCell enrichment scores projected onto HypoMap UMAP (magma colormap) |
+| **1b** | Horizontal barplot | Mean AUCell score per cluster with SEM error bars (top 25) |
+| **1c** | Violin plots | Per-cluster AUCell score distributions for top 15 clusters |
+| **1d** | Histogram | Global AUCell score distribution with 90/95/99th percentile markers |
+| **1e** | Heatmap | Composite consensus ranking across all methods (percentile scores, YlOrRd) |
+
+**Supplementary Figures** — complementary analysis approaches:
+
 | Figure | Type | Description |
 |---|---|---|
-| **Volcano** | Scatter plot | bacTRAP gene-level volcano (log2FC vs -log10 padj), with Pnoc and top enriched genes labeled |
-| **A** | Horizontal barplot | Top 20 clusters by Spearman correlation, colored by rho |
-| **B** | Two-panel UMAP | Left: cell-type annotation (legend below), Right: bacTRAP enrichment score (magma) |
-| **C** | Dot plot | Top enriched genes vs correlation-ranked clusters (size = % expressing, color = mean expression) |
-| **D** | Volcano plot | log2(odds ratio) vs -log10(p-value) from Fisher's test, top hits labeled |
-| **E** | Heatmap | Z-scored expression, genes clustered by Ward's linkage, diverging RdBu_r colormap |
-| **F** | Horizontal barplot | NNLS deconvolution weights per cluster (magma colormap) |
-| **G** | Line plot | Running GSEA enrichment score curves for top 5 clusters (legend right of plot) |
-| **H** | Horizontal barplot | Normalized Enrichment Scores with FDR significance coloring |
-| **I** | UMAP | AUCell enrichment scores projected onto HypoMap UMAP (magma) |
+| **Volcano** | Scatter plot | bacTRAP gene-level volcano (log2FC vs -log10 padj), with Pnoc and top enriched genes labeled (Data Overview tab) |
+| **S1** | Horizontal barplot | Top 20 clusters by Spearman correlation, colored by rho |
+| **S2** | Two-panel UMAP | Left: cell-type annotation (legend below), Right: bacTRAP enrichment score (magma) |
+| **S3** | Volcano plot | log2(odds ratio) vs -log10(p-value) from Fisher's test, top hits labeled |
+| **S4** | Dot plot | Top enriched genes vs correlation-ranked clusters (size = % expressing, color = mean expression) |
+| **S5** | Heatmap | Z-scored expression, genes clustered by Ward's linkage, diverging RdBu_r colormap |
+| **S6** | Horizontal barplot | NNLS deconvolution weights per cluster (magma colormap) |
+| **S7** | Line plot | Running GSEA enrichment score curves for top 5 clusters (legend right of plot) |
+| **S8** | Horizontal barplot | Normalized Enrichment Scores with FDR significance coloring |
 
 ---
 
@@ -193,7 +205,7 @@ All figures follow Nature journal specifications:
 
 ```
 bacTRAP-to-HypoMapMapping/
-├── app.py              # Main Streamlit application (UI, 8 tabs, orchestration)
+├── app.py              # Main Streamlit application (UI, 9 tabs, orchestration)
 ├── data_loading.py     # Data I/O, gene matching, cluster expression computation
 ├── analysis.py         # All analysis methods (correlation, Fisher, NNLS, GSEA, AUCell)
 ├── figures.py          # Nature-grade figure generation and export

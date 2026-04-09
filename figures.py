@@ -186,12 +186,12 @@ def figure_umap_enrichment(
     subsample_idx: Optional[np.ndarray] = None,
     max_legend_items: int = 20,
 ) -> plt.Figure:
-    logger.info("figure_umap_enrichment: %d cells, %d unique labels, subsample=%s",
-                len(umap_coords), len(np.unique(cell_labels)),
-                len(subsample_idx) if subsample_idx is not None else "none")
     """
     Two-panel UMAP: left colored by cell-type annotation, right by enrichment score.
     """
+    logger.info("figure_umap_enrichment: %d cells, %d unique labels, subsample=%s",
+                len(umap_coords), len(np.unique(cell_labels)),
+                len(subsample_idx) if subsample_idx is not None else "none")
     setup_nature_style()
     width = get_figure_width(double_column=True)  # always double for two panels
     height = width * 0.5
@@ -262,8 +262,8 @@ def figure_umap_enrichment(
     )
 
     # --- Right panel: enrichment score ---
-    vmin = np.percentile(enrichment_scores, 2)
-    vmax = np.percentile(enrichment_scores, 98)
+    vmin = np.nanpercentile(enrichment_scores, 2)
+    vmax = np.nanpercentile(enrichment_scores, 98)
 
     sc = ax2.scatter(
         umap_coords[:, 0], umap_coords[:, 1],
@@ -297,13 +297,13 @@ def figure_dotplot(
     top_clusters: List[str],
     double_column: bool = True,
 ) -> plt.Figure:
-    logger.info("figure_dotplot: %d genes requested, %d clusters requested, "
-                "mean_expr=%s, frac_expr=%s",
-                len(top_genes), len(top_clusters), mean_expr.shape, frac_expr.shape)
     """
     Dot plot: dot size = fraction expressing, dot color = mean expression.
     Rows = genes, columns = clusters.
     """
+    logger.info("figure_dotplot: %d genes requested, %d clusters requested, "
+                "mean_expr=%s, frac_expr=%s",
+                len(top_genes), len(top_clusters), mean_expr.shape, frac_expr.shape)
     setup_nature_style()
 
     genes = [g for g in top_genes if g in mean_expr.index and g in frac_expr.index]
@@ -850,8 +850,8 @@ def figure_aucell_umap(
     umap_coords = umap_coords[order]
     aucell_scores = aucell_scores[order]
 
-    vmin = np.percentile(aucell_scores, 2)
-    vmax = np.percentile(aucell_scores, 98)
+    vmin = np.nanpercentile(aucell_scores, 2)
+    vmax = np.nanpercentile(aucell_scores, 98)
 
     sc = ax.scatter(
         umap_coords[:, 0], umap_coords[:, 1],
