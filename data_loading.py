@@ -567,6 +567,54 @@ def _extract_gene_submatrix(
     return out, survived_mask
 
 
+def _get_total_counts_per_cell(
+    adata: ad.AnnData, use_raw: bool = True
+) -> np.ndarray:
+    """Return total counts per cell (n_cells,).
+
+    Prefers a pre-computed ``nCount_RNA`` column in ``adata.obs`` when
+    present; otherwise computes the row sums of the full raw (or X) matrix
+    once.  Caches the result on ``adata.uns`` to avoid repeated work.
+    """
+    cache_key = "_total_counts_raw" if use_raw else "_total_counts_X"
+    if cache_key in adata.uns:
+        cached = np.asarray(adata.uns[cache_key])
+        if cached.shape[0] == adata.n_obs:
+            return cached
+
+    if "nCount_RNA" in adata.obs.columns:
+        totals = adata.obs["nCount_RNA"].values.astype(np.float32)
+        adata.uns[cache_key] = totals
+        logger.info("_get_total_counts_per_cell: using obs['nCount_RNA']")
+        return totals
+
+    if use_raw and adata.raw is not None:
+        X_full = adata.raw.X
+    else:
+        X_full = adata.X
+    if sparse.issparse(X_full):
+        totals = np.asarray(X_full.sum(axis=1)).ravel().astype(np.float32)
+    else:
+        totals = np.asarray(X_full.sum(axis=1)).astype(np.float32)
+    adata.uns[cache_key] = totals
+    logger.info("_get_total_counts_per_cell: computed row sums for %d cells", len(totals))
+    return totals
+
+
+def _looks_like_raw_counts(X_genes: np.ndarray, sample_size: int = 1000) -> bool:
+    """Heuristic: raw UMI counts contain integers with max > 50."""
+    if X_genes.size == 0:
+        return False
+    n_cells = X_genes.shape[0]
+    if n_cells > sample_size:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(n_cells, sample_size, replace=False)
+        sample = X_genes[idx, :]
+    else:
+        sample = X_genes
+    return float(np.max(sample)) > 50.0
+
+
 def compute_cluster_mean_expression(
     adata: ad.AnnData,
     gene_indices: List[int],
@@ -574,6 +622,8 @@ def compute_cluster_mean_expression(
     min_cells: int = 10,
     use_raw: bool = True,
     indices_in_raw: bool = False,
+    normalize: Optional[bool] = None,
+    target_sum: float = 1e4,
 ) -> pd.DataFrame:
     """
     Compute mean expression per cluster for a set of genes.
@@ -581,6 +631,12 @@ def compute_cluster_mean_expression(
     When *indices_in_raw* is False (legacy), gene_indices refer to
     positions in ``adata.var`` and are remapped to ``adata.raw.var``
     internally.  When True, they already point into ``adata.raw.var``.
+
+    If *normalize* is True (or None with auto-detected raw counts), each
+    cell is size-normalized to ``target_sum`` and log1p-transformed before
+    the per-cluster mean is computed.  This avoids the library-depth bias
+    that otherwise lets high-count clusters (e.g. ependymal, endothelial,
+    stromal) dominate downstream correlation and NNLS deconvolution.
 
     Returns a DataFrame with shape (n_survived_genes, n_clusters).
     """
@@ -593,6 +649,31 @@ def compute_cluster_mean_expression(
     X_genes, survived_mask = _extract_gene_submatrix(
         adata, gene_indices_arr, use_raw=use_raw, indices_in_raw=indices_in_raw,
     )
+
+    # ---- Per-cell normalization (normalize_total + log1p) ------------------
+    # Done on the extracted submatrix (cells x selected_genes) using
+    # pre-computed per-cell totals from the FULL matrix so the size factor
+    # is correct.  Without this the cluster means reflect raw UMI counts,
+    # giving disproportionate weight to high-depth non-neuronal clusters
+    # during correlation/NNLS.
+    if normalize is None:
+        normalize = _looks_like_raw_counts(X_genes)
+        logger.info("compute_cluster_mean_expression: auto normalize=%s", normalize)
+    if normalize and X_genes.size > 0:
+        # Use raw totals when the extracted matrix itself came from raw
+        totals_use_raw = use_raw or indices_in_raw
+        totals = _get_total_counts_per_cell(adata, use_raw=totals_use_raw)
+        # Guard against zero totals
+        safe_totals = np.where(totals > 0, totals, 1.0).astype(np.float32)
+        scale = (target_sum / safe_totals).astype(np.float32)
+        # In-place size-factor scaling + log1p
+        X_genes = X_genes.astype(np.float32, copy=False) * scale[:, None]
+        np.log1p(X_genes, out=X_genes)
+        logger.info(
+            "compute_cluster_mean_expression: applied normalize_total(target=%.0f) + log1p "
+            "(post-norm max=%.3f)",
+            target_sum, float(X_genes.max()) if X_genes.size else 0.0,
+        )
 
     result = {}
     for label in valid_labels:

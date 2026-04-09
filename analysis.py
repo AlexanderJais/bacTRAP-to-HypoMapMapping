@@ -477,12 +477,28 @@ def compute_nnls_deconvolution(
     enrichment_col: str = "log2FoldChange",
 ) -> pd.DataFrame:
     """
-    Non-negative least squares deconvolution: find non-negative cluster
-    weights that best reconstruct the bacTRAP enrichment profile from
-    cluster-level mean expression signatures.
+    Non-negative least squares deconvolution of the bacTRAP enrichment
+    profile onto a cluster *specificity* signature matrix.
 
-    Solves: min ||A @ w - b||_2  subject to w >= 0
-    where A = (genes x clusters) mean expression, b = bacTRAP enrichment.
+    The bacTRAP enrichment vector ``b`` (log2FC, IP vs Input) is a
+    ratio/deviation quantity.  Fitting it against a raw cluster mean
+    expression matrix is ill-posed because ``b`` and a raw-counts ``A``
+    live in different spaces — clusters with high per-cell library depth
+    (ependymal, endothelial, stromal) acquire inflated column norms and
+    dominate the solution regardless of biology.
+
+    To put ``A`` and ``b`` in comparable spaces we:
+
+    1. Expect ``cluster_mean_expr`` to already be log-normalized (the
+       upstream helper applies normalize_total + log1p).
+    2. Row-standardize ``A`` across clusters per gene (z-score) so each
+       row encodes *how cluster-specific* the gene is — the same kind of
+       deviation quantity as ``log2FC``.
+    3. Center ``b`` around its mean so NNLS fits relative enrichment
+       rather than the absolute positive offset (all enriched genes have
+       positive log2FC, which would otherwise bias every cluster up).
+
+    Solves: ``min ||A_z @ w - b_c||_2``  subject to ``w >= 0``.
 
     Returns:
         DataFrame with columns: cluster, weight, weight_norm (0–1 scaled),
@@ -515,10 +531,42 @@ def compute_nnls_deconvolution(
         common = np.intersect1d(common, expr_sub.index.values)
         enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
         expr_sub = expr_sub.loc[common]
-    A = expr_sub.values.astype(float)  # (genes, clusters)
-    b = enrichment.astype(float)
 
-    logger.info("  NNLS input: A=%s, b=%s", A.shape, b.shape)
+    A_raw = expr_sub.values.astype(float)  # (genes, clusters)
+
+    # ---- Row-wise z-score (cluster specificity per gene) -------------------
+    # For each gene, compute how many std-devs each cluster is from the
+    # gene's across-cluster mean.  Genes with no variance across clusters
+    # (uniformly expressed or uniformly absent) are dropped — they carry no
+    # information for deconvolution.
+    row_mean = A_raw.mean(axis=1, keepdims=True)
+    row_std = A_raw.std(axis=1, keepdims=True)
+    informative = (row_std.ravel() > 1e-8)
+    n_dropped = int((~informative).sum())
+    if n_dropped > 0:
+        logger.info("  dropping %d/%d genes with zero cross-cluster variance",
+                    n_dropped, len(informative))
+    A_raw = A_raw[informative]
+    row_mean = row_mean[informative]
+    row_std = row_std[informative]
+    enrichment = enrichment[informative]
+    common = common[informative]
+
+    if len(common) < 5:
+        logger.warning("  <5 informative genes — skipping NNLS")
+        return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
+
+    A = (A_raw - row_mean) / row_std  # z-score across clusters, per gene
+
+    # ---- Centre b so NNLS fits relative (not offset) enrichment ------------
+    # All values in b (log2FC for enriched genes) are positive; subtracting
+    # the mean removes the global offset that NNLS would otherwise try to
+    # absorb by spreading weight across many clusters.
+    b = enrichment.astype(float) - float(enrichment.mean())
+
+    logger.info("  NNLS input: A=%s (z-scored), b=%s (centered), "
+                "b range=[%.3f, %.3f]",
+                A.shape, b.shape, float(b.min()), float(b.max()))
     w, residual = nnls(A, b)
     n_nonzero = int((w > 0).sum())
     logger.info("  NNLS result: residual=%.4f, %d/%d clusters with nonzero weight, max_weight=%.4f",
