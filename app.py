@@ -189,6 +189,7 @@ from figures import (
     figure_aucell_cluster_barplot,
     figure_aucell_violins,
     figure_aucell_histogram,
+    figure_composite_ranking,
     fig_to_bytes,
 )
 
@@ -273,14 +274,15 @@ _gene_col_for_matching = "_index" if gene_col_selection == "(use row index)" els
 # Progress bar placeholder — rendered above tabs so it's always visible
 progress_placeholder = st.empty()
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab_aucell, tab3, tab4, tab5, tab6, tab7, tab8, tab_export = st.tabs([
     "📊 Data Overview",
-    "📈 Correlation",
-    "🗺️ UMAP Projection",
-    "🔬 Marker Overlap",
-    "🔥 Heatmap",
-    "⚖️ NNLS Deconvolution",
-    "📶 GSEA",
+    "⭐ AUCell (Main Figure)",
+    "📈 Correlation (Suppl.)",
+    "🗺️ UMAP Projection (Suppl.)",
+    "🔬 Marker Overlap (Suppl.)",
+    "🔥 Heatmap (Suppl.)",
+    "⚖️ NNLS (Suppl.)",
+    "📶 GSEA (Suppl.)",
     "📥 Export",
 ])
 
@@ -652,10 +654,172 @@ if run_button or st.session_state.analysis_done:
         plt.close(fig_volcano)
 
     # ======================================================================
-    # TAB 2: Correlation Analysis
+    # TAB: AUCell (MAIN FIGURE)
     # ======================================================================
-    with tab2:
-        st.header("Enrichment Correlation Analysis")
+    with tab_aucell:
+        st.header("Main Figure: AUCell Enrichment Analysis")
+        st.markdown(
+            "AUCell (rank-based Area Under the Curve) is the primary cell-type "
+            "mapping method — it is **normalization-insensitive**, **threshold-free**, "
+            "and quantifies per-cell enrichment of the bacTRAP gene set. "
+            f"Scores computed from the top **{len(top_enriched_genes)}** enriched genes."
+        )
+
+        # Figure 1a: AUCell UMAP
+        st.subheader("Figure 1a: AUCell Enrichment UMAP")
+        fig_1a = figure_aucell_umap(
+            umap_coords, aucell_scores,
+            double_column=double_column,
+            subsample_idx=sub_indices,
+        )
+        st.pyplot(fig_1a)
+        _cache_fig("fig_1a_aucell_umap", fig_1a)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_1a_aucell_umap"]["pdf"],
+                "fig_1a_aucell_umap.pdf", "application/pdf",
+                key="dl_fig_1a_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_1a_aucell_umap"]["svg"],
+                "fig_1a_aucell_umap.svg", "image/svg+xml",
+                key="dl_fig_1a_svg",
+            )
+        plt.close(fig_1a)
+
+        # Figure 1b: AUCell Cluster Barplot
+        st.subheader("Figure 1b: AUCell Score per Cluster")
+        st.markdown(
+            "Mean AUCell score per cluster (error bars = SEM). "
+            "Clusters where cells consistently express the enriched gene set "
+            "rank highest."
+        )
+        fig_1b = figure_aucell_cluster_barplot(
+            aucell_scores, cell_labels,
+            top_n=25, double_column=double_column,
+        )
+        st.pyplot(fig_1b)
+        _cache_fig("fig_1b_aucell_barplot", fig_1b)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_1b_aucell_barplot"]["pdf"],
+                "fig_1b_aucell_barplot.pdf", "application/pdf",
+                key="dl_fig_1b_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_1b_aucell_barplot"]["svg"],
+                "fig_1b_aucell_barplot.svg", "image/svg+xml",
+                key="dl_fig_1b_svg",
+            )
+        plt.close(fig_1b)
+
+        # Figure 1c: AUCell Violin Plots
+        st.subheader("Figure 1c: AUCell Score Distributions (Top Clusters)")
+        st.markdown(
+            "Violin plots showing the full distribution of AUCell scores within "
+            "each top-ranked cluster. Solid line = mean, dashed = median."
+        )
+        fig_1c = figure_aucell_violins(
+            aucell_scores, cell_labels,
+            top_n=15, double_column=True,
+        )
+        st.pyplot(fig_1c)
+        _cache_fig("fig_1c_aucell_violins", fig_1c)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_1c_aucell_violins"]["pdf"],
+                "fig_1c_aucell_violins.pdf", "application/pdf",
+                key="dl_fig_1c_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_1c_aucell_violins"]["svg"],
+                "fig_1c_aucell_violins.svg", "image/svg+xml",
+                key="dl_fig_1c_svg",
+            )
+        plt.close(fig_1c)
+
+        # Figure 1d: AUCell Score Histogram
+        st.subheader("Figure 1d: AUCell Score Distribution (All Cells)")
+        st.markdown(
+            "Global distribution of AUCell scores with percentile markers. "
+            "Cells above the 95th percentile are most likely part of the "
+            "bacTRAP target population."
+        )
+        fig_1d = figure_aucell_histogram(
+            aucell_scores, double_column=double_column,
+        )
+        st.pyplot(fig_1d)
+        _cache_fig("fig_1d_aucell_histogram", fig_1d)
+
+        col_pdf, col_svg = st.columns(2)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_1d_aucell_histogram"]["pdf"],
+                "fig_1d_aucell_histogram.pdf", "application/pdf",
+                key="dl_fig_1d_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_1d_aucell_histogram"]["svg"],
+                "fig_1d_aucell_histogram.svg", "image/svg+xml",
+                key="dl_fig_1d_svg",
+            )
+        plt.close(fig_1d)
+
+        # Figure 1e: Composite Consensus Ranking
+        st.markdown("---")
+        st.subheader("Figure 1e: Composite Consensus Ranking")
+        st.markdown(
+            "Validation: consensus ranking across all methods confirms AUCell "
+            "results. Each method's scores are converted to percentile ranks "
+            "and averaged."
+        )
+        if len(composite_df) > 0:
+            fig_1e = figure_composite_ranking(composite_df, top_n=20, double_column=True)
+            st.pyplot(fig_1e)
+            _cache_fig("fig_1e_composite_ranking", fig_1e)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_1e_composite_ranking"]["pdf"],
+                    "fig_1e_composite_ranking.pdf", "application/pdf",
+                    key="dl_fig_1e_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_1e_composite_ranking"]["svg"],
+                    "fig_1e_composite_ranking.svg", "image/svg+xml",
+                    key="dl_fig_1e_svg",
+                )
+            plt.close(fig_1e)
+        else:
+            st.warning("No composite ranking data available.")
+
+    # ======================================================================
+    # TAB 3: Correlation Analysis (Supplementary)
+    # ======================================================================
+    with tab3:
+        st.header("Supplementary: Enrichment Correlation Analysis")
         st.markdown(
             "Pearson and Spearman correlation between the bacTRAP log₂FC enrichment "
             "profile and mean expression per HypoMap cluster."
@@ -695,25 +859,25 @@ if run_button or st.session_state.analysis_done:
 
             st.dataframe(styled, use_container_width=True)
 
-            st.subheader("Figure A: Correlation Barplot")
+            st.subheader("Supplementary Figure S1: Correlation Barplot")
             fig_a = figure_correlation_barplot(corr_df, top_n=20, double_column=double_column)
             st.pyplot(fig_a)
-            _cache_fig("fig_a_correlation_barplot", fig_a)
+            _cache_fig("fig_s1_correlation_barplot", fig_a)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
                     "Download PDF",
-                    st.session_state.fig_bytes["fig_a_correlation_barplot"]["pdf"],
-                    "fig_a_correlation.pdf", "application/pdf",
-                    key="dl_fig_a_pdf",
+                    st.session_state.fig_bytes["fig_s1_correlation_barplot"]["pdf"],
+                    "fig_s1_correlation.pdf", "application/pdf",
+                    key="dl_fig_s1_pdf",
                 )
             with col_svg:
                 st.download_button(
                     "Download SVG",
-                    st.session_state.fig_bytes["fig_a_correlation_barplot"]["svg"],
-                    "fig_a_correlation.svg", "image/svg+xml",
-                    key="dl_fig_a_svg",
+                    st.session_state.fig_bytes["fig_s1_correlation_barplot"]["svg"],
+                    "fig_s1_correlation.svg", "image/svg+xml",
+                    key="dl_fig_s1_svg",
                 )
             plt.close(fig_a)
 
@@ -727,17 +891,17 @@ if run_button or st.session_state.analysis_done:
             st.warning("No correlation results to display.")
 
     # ======================================================================
-    # TAB 3: UMAP Projection
+    # TAB 4: UMAP Projection (Supplementary)
     # ======================================================================
-    with tab3:
-        st.header("UMAP Enrichment Projection")
+    with tab4:
+        st.header("Supplementary: UMAP Enrichment Projection")
         st.markdown(
             f"bacTRAP enrichment score projected onto the HypoMap UMAP. "
             f"Score computed from the top **{len(top_enriched_genes)}** enriched "
             f"genes (padj < {padj_cutoff}, log₂FC > {log2fc_cutoff})."
         )
 
-        st.subheader("Figure B: UMAP Enrichment Map")
+        st.subheader("Supplementary Figure S2: UMAP Enrichment Map")
         fig_b = figure_umap_enrichment(
             umap_coords=umap_coords,
             cell_labels=cell_labels,
@@ -747,30 +911,30 @@ if run_button or st.session_state.analysis_done:
             subsample_idx=sub_indices,
         )
         st.pyplot(fig_b)
-        _cache_fig("fig_b_umap_enrichment", fig_b)
+        _cache_fig("fig_s2_umap_enrichment", fig_b)
 
         col_pdf, col_svg = st.columns(2)
         with col_pdf:
             st.download_button(
                 "Download PDF",
-                st.session_state.fig_bytes["fig_b_umap_enrichment"]["pdf"],
-                "fig_b_umap.pdf", "application/pdf",
-                key="dl_fig_b_pdf",
+                st.session_state.fig_bytes["fig_s2_umap_enrichment"]["pdf"],
+                "fig_s2_umap.pdf", "application/pdf",
+                key="dl_fig_s2_pdf",
             )
         with col_svg:
             st.download_button(
                 "Download SVG",
-                st.session_state.fig_bytes["fig_b_umap_enrichment"]["svg"],
-                "fig_b_umap.svg", "image/svg+xml",
-                key="dl_fig_b_svg",
+                st.session_state.fig_bytes["fig_s2_umap_enrichment"]["svg"],
+                "fig_s2_umap.svg", "image/svg+xml",
+                key="dl_fig_s2_svg",
             )
         plt.close(fig_b)
 
     # ======================================================================
-    # TAB 4: Marker Overlap
+    # TAB 5: Marker Overlap (Supplementary)
     # ======================================================================
-    with tab4:
-        st.header("Marker Gene Overlap Analysis")
+    with tab5:
+        st.header("Supplementary: Marker Gene Overlap Analysis")
         st.markdown(
             "One-sided Fisher's exact test for overlap between bacTRAP-enriched genes "
             "and HypoMap cluster markers."
@@ -791,33 +955,33 @@ if run_button or st.session_state.analysis_done:
                 use_container_width=True,
             )
 
-            st.subheader("Figure D: Enrichment Volcano Plot")
+            st.subheader("Supplementary Figure S3: Enrichment Volcano Plot")
             fig_d = figure_volcano_enrichment(
                 fisher_df, pval_threshold=padj_cutoff,
                 double_column=double_column,
             )
             st.pyplot(fig_d)
-            _cache_fig("fig_d_volcano_enrichment", fig_d)
+            _cache_fig("fig_s3_volcano_enrichment", fig_d)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
                     "Download PDF",
-                    st.session_state.fig_bytes["fig_d_volcano_enrichment"]["pdf"],
-                    "fig_d_volcano.pdf", "application/pdf",
-                    key="dl_fig_d_pdf",
+                    st.session_state.fig_bytes["fig_s3_volcano_enrichment"]["pdf"],
+                    "fig_s3_volcano.pdf", "application/pdf",
+                    key="dl_fig_s3_pdf",
                 )
             with col_svg:
                 st.download_button(
                     "Download SVG",
-                    st.session_state.fig_bytes["fig_d_volcano_enrichment"]["svg"],
-                    "fig_d_volcano.svg", "image/svg+xml",
-                    key="dl_fig_d_svg",
+                    st.session_state.fig_bytes["fig_s3_volcano_enrichment"]["svg"],
+                    "fig_s3_volcano.svg", "image/svg+xml",
+                    key="dl_fig_s3_svg",
                 )
             plt.close(fig_d)
 
             # Dotplot — use correlation-ranked clusters (preferring dual-significant)
-            st.subheader("Figure C: Enriched Gene Dot Plot")
+            st.subheader("Supplementary Figure S4: Enriched Gene Dot Plot")
             if len(corr_df) > 0 and "both_significant" in corr_df.columns:
                 _sig_dp = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
                 dotplot_clusters = _sig_dp[:15] if len(_sig_dp) >= 5 else corr_df["cluster"].tolist()[:15]
@@ -830,22 +994,22 @@ if run_button or st.session_state.analysis_done:
                 double_column=True,
             )
             st.pyplot(fig_c)
-            _cache_fig("fig_c_dotplot", fig_c)
+            _cache_fig("fig_s4_dotplot", fig_c)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
                     "Download PDF",
-                    st.session_state.fig_bytes["fig_c_dotplot"]["pdf"],
-                    "fig_c_dotplot.pdf", "application/pdf",
-                    key="dl_fig_c_pdf",
+                    st.session_state.fig_bytes["fig_s4_dotplot"]["pdf"],
+                    "fig_s4_dotplot.pdf", "application/pdf",
+                    key="dl_fig_s4_pdf",
                 )
             with col_svg:
                 st.download_button(
                     "Download SVG",
-                    st.session_state.fig_bytes["fig_c_dotplot"]["svg"],
-                    "fig_c_dotplot.svg", "image/svg+xml",
-                    key="dl_fig_c_svg",
+                    st.session_state.fig_bytes["fig_s4_dotplot"]["svg"],
+                    "fig_s4_dotplot.svg", "image/svg+xml",
+                    key="dl_fig_s4_svg",
                 )
             plt.close(fig_c)
 
@@ -859,45 +1023,45 @@ if run_button or st.session_state.analysis_done:
             st.warning("No marker overlap results to display.")
 
     # ======================================================================
-    # TAB 5: Gene Heatmap
+    # TAB 6: Gene Heatmap (Supplementary)
     # ======================================================================
-    with tab5:
-        st.header("Gene Expression Heatmap")
+    with tab6:
+        st.header("Supplementary: Gene Expression Heatmap")
         st.markdown(
             "Z-scored mean expression of top bacTRAP-enriched genes across "
             "the highest-correlating HypoMap clusters."
         )
 
         if not zscore_df.empty:
-            st.subheader("Figure E: Heatmap")
+            st.subheader("Supplementary Figure S5: Heatmap")
             fig_e = figure_heatmap(zscore_df, double_column=double_column)
             st.pyplot(fig_e)
-            _cache_fig("fig_e_heatmap", fig_e)
+            _cache_fig("fig_s5_heatmap", fig_e)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
                     "Download PDF",
-                    st.session_state.fig_bytes["fig_e_heatmap"]["pdf"],
-                    "fig_e_heatmap.pdf", "application/pdf",
-                    key="dl_fig_e_pdf",
+                    st.session_state.fig_bytes["fig_s5_heatmap"]["pdf"],
+                    "fig_s5_heatmap.pdf", "application/pdf",
+                    key="dl_fig_s5_pdf",
                 )
             with col_svg:
                 st.download_button(
                     "Download SVG",
-                    st.session_state.fig_bytes["fig_e_heatmap"]["svg"],
-                    "fig_e_heatmap.svg", "image/svg+xml",
-                    key="dl_fig_e_svg",
+                    st.session_state.fig_bytes["fig_s5_heatmap"]["svg"],
+                    "fig_s5_heatmap.svg", "image/svg+xml",
+                    key="dl_fig_s5_svg",
                 )
             plt.close(fig_e)
         else:
             st.warning("No heatmap data available with current parameters.")
 
     # ======================================================================
-    # TAB 6: NNLS Deconvolution
+    # TAB 7: NNLS Deconvolution (Supplementary)
     # ======================================================================
-    with tab6:
-        st.header("NNLS Deconvolution")
+    with tab7:
+        st.header("Supplementary: NNLS Deconvolution")
         st.markdown(
             "Non-negative least squares: find cluster weights that best "
             "reconstruct the bacTRAP enrichment profile from cluster-level "
@@ -917,25 +1081,25 @@ if run_button or st.session_state.analysis_done:
                 use_container_width=True,
             )
 
-            st.subheader("Figure F: NNLS Deconvolution")
+            st.subheader("Supplementary Figure S6: NNLS Deconvolution")
             fig_f = figure_nnls_barplot(nnls_df, top_n=20, double_column=double_column)
             st.pyplot(fig_f)
-            _cache_fig("fig_f_nnls", fig_f)
+            _cache_fig("fig_s6_nnls", fig_f)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
                     "Download PDF",
-                    st.session_state.fig_bytes["fig_f_nnls"]["pdf"],
-                    "fig_f_nnls.pdf", "application/pdf",
-                    key="dl_fig_f_pdf",
+                    st.session_state.fig_bytes["fig_s6_nnls"]["pdf"],
+                    "fig_s6_nnls.pdf", "application/pdf",
+                    key="dl_fig_s6_pdf",
                 )
             with col_svg:
                 st.download_button(
                     "Download SVG",
-                    st.session_state.fig_bytes["fig_f_nnls"]["svg"],
-                    "fig_f_nnls.svg", "image/svg+xml",
-                    key="dl_fig_f_svg",
+                    st.session_state.fig_bytes["fig_s6_nnls"]["svg"],
+                    "fig_s6_nnls.svg", "image/svg+xml",
+                    key="dl_fig_s6_svg",
                 )
             plt.close(fig_f)
 
@@ -949,10 +1113,10 @@ if run_button or st.session_state.analysis_done:
             st.warning("NNLS deconvolution produced no results.")
 
     # ======================================================================
-    # TAB 7: GSEA
+    # TAB 8: GSEA (Supplementary)
     # ======================================================================
-    with tab7:
-        st.header("GSEA: Preranked Enrichment")
+    with tab8:
+        st.header("Supplementary: GSEA Preranked Enrichment")
         st.markdown(
             "All matched genes are ranked by bacTRAP log₂FC. For each cluster's "
             "marker gene set, a running enrichment score is computed — more "
@@ -972,50 +1136,50 @@ if run_button or st.session_state.analysis_done:
                 use_container_width=True,
             )
 
-            st.subheader("Figure G: Enrichment Curves (top 5)")
+            st.subheader("Supplementary Figure S7: Enrichment Curves (top 5)")
             fig_g = figure_gsea_curves(
                 gsea_df, gsea_running_scores, gsea_ranked_genes,
                 top_n=5, double_column=double_column,
             )
             st.pyplot(fig_g)
-            _cache_fig("fig_g_gsea_curves", fig_g)
+            _cache_fig("fig_s7_gsea_curves", fig_g)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
                     "Download PDF",
-                    st.session_state.fig_bytes["fig_g_gsea_curves"]["pdf"],
-                    "fig_g_gsea_curves.pdf", "application/pdf",
-                    key="dl_fig_g_pdf",
+                    st.session_state.fig_bytes["fig_s7_gsea_curves"]["pdf"],
+                    "fig_s7_gsea_curves.pdf", "application/pdf",
+                    key="dl_fig_s7_pdf",
                 )
             with col_svg:
                 st.download_button(
                     "Download SVG",
-                    st.session_state.fig_bytes["fig_g_gsea_curves"]["svg"],
-                    "fig_g_gsea_curves.svg", "image/svg+xml",
-                    key="dl_fig_g_svg",
+                    st.session_state.fig_bytes["fig_s7_gsea_curves"]["svg"],
+                    "fig_s7_gsea_curves.svg", "image/svg+xml",
+                    key="dl_fig_s7_svg",
                 )
             plt.close(fig_g)
 
-            st.subheader("Figure H: NES Barplot")
+            st.subheader("Supplementary Figure S8: NES Barplot")
             fig_h = figure_gsea_barplot(gsea_df, top_n=20, double_column=double_column)
             st.pyplot(fig_h)
-            _cache_fig("fig_h_gsea_barplot", fig_h)
+            _cache_fig("fig_s8_gsea_barplot", fig_h)
 
             col_pdf, col_svg = st.columns(2)
             with col_pdf:
                 st.download_button(
                     "Download PDF",
-                    st.session_state.fig_bytes["fig_h_gsea_barplot"]["pdf"],
-                    "fig_h_gsea_barplot.pdf", "application/pdf",
-                    key="dl_fig_h_pdf",
+                    st.session_state.fig_bytes["fig_s8_gsea_barplot"]["pdf"],
+                    "fig_s8_gsea_barplot.pdf", "application/pdf",
+                    key="dl_fig_s8_pdf",
                 )
             with col_svg:
                 st.download_button(
                     "Download SVG",
-                    st.session_state.fig_bytes["fig_h_gsea_barplot"]["svg"],
-                    "fig_h_gsea_barplot.svg", "image/svg+xml",
-                    key="dl_fig_h_svg",
+                    st.session_state.fig_bytes["fig_s8_gsea_barplot"]["svg"],
+                    "fig_s8_gsea_barplot.svg", "image/svg+xml",
+                    key="dl_fig_s8_svg",
                 )
             plt.close(fig_h)
 
@@ -1028,139 +1192,10 @@ if run_button or st.session_state.analysis_done:
         else:
             st.warning("No GSEA results to display.")
 
-        # AUCell — rendered independently of GSEA results since
-        # AUCell scoring is computed from the enriched gene set directly.
-        st.markdown("---")
-        st.subheader("AUCell Analysis")
-        st.markdown(
-            "AUCell (rank-based Area Under the Curve) scores per cell — "
-            "more robust than mean expression because it's rank-based and "
-            "threshold-free. Scores are computed from the top "
-            f"**{len(top_enriched_genes)}** enriched genes."
-        )
-
-        # I-1: UMAP
-        st.subheader("Figure I-1: AUCell Enrichment UMAP")
-        fig_i1 = figure_aucell_umap(
-            umap_coords, aucell_scores,
-            double_column=double_column,
-            subsample_idx=sub_indices,
-        )
-        st.pyplot(fig_i1)
-        _cache_fig("fig_i1_aucell_umap", fig_i1)
-
-        col_pdf, col_svg = st.columns(2)
-        with col_pdf:
-            st.download_button(
-                "Download PDF",
-                st.session_state.fig_bytes["fig_i1_aucell_umap"]["pdf"],
-                "fig_i1_aucell_umap.pdf", "application/pdf",
-                key="dl_fig_i1_pdf",
-            )
-        with col_svg:
-            st.download_button(
-                "Download SVG",
-                st.session_state.fig_bytes["fig_i1_aucell_umap"]["svg"],
-                "fig_i1_aucell_umap.svg", "image/svg+xml",
-                key="dl_fig_i1_svg",
-            )
-        plt.close(fig_i1)
-
-        # I-2: Cluster barplot
-        st.subheader("Figure I-2: AUCell Score per Cluster")
-        st.markdown(
-            "Mean AUCell score per cluster (error bars = SEM). "
-            "Clusters where cells consistently express the enriched gene set "
-            "rank highest."
-        )
-        fig_i2 = figure_aucell_cluster_barplot(
-            aucell_scores, cell_labels,
-            top_n=25, double_column=double_column,
-        )
-        st.pyplot(fig_i2)
-        _cache_fig("fig_i2_aucell_barplot", fig_i2)
-
-        col_pdf, col_svg = st.columns(2)
-        with col_pdf:
-            st.download_button(
-                "Download PDF",
-                st.session_state.fig_bytes["fig_i2_aucell_barplot"]["pdf"],
-                "fig_i2_aucell_barplot.pdf", "application/pdf",
-                key="dl_fig_i2_pdf",
-            )
-        with col_svg:
-            st.download_button(
-                "Download SVG",
-                st.session_state.fig_bytes["fig_i2_aucell_barplot"]["svg"],
-                "fig_i2_aucell_barplot.svg", "image/svg+xml",
-                key="dl_fig_i2_svg",
-            )
-        plt.close(fig_i2)
-
-        # I-3: Violin plots
-        st.subheader("Figure I-3: AUCell Score Distributions (Top Clusters)")
-        st.markdown(
-            "Violin plots showing the full distribution of AUCell scores within "
-            "each top-ranked cluster. Solid line = mean, dashed = median."
-        )
-        fig_i3 = figure_aucell_violins(
-            aucell_scores, cell_labels,
-            top_n=15, double_column=True,
-        )
-        st.pyplot(fig_i3)
-        _cache_fig("fig_i3_aucell_violins", fig_i3)
-
-        col_pdf, col_svg = st.columns(2)
-        with col_pdf:
-            st.download_button(
-                "Download PDF",
-                st.session_state.fig_bytes["fig_i3_aucell_violins"]["pdf"],
-                "fig_i3_aucell_violins.pdf", "application/pdf",
-                key="dl_fig_i3_pdf",
-            )
-        with col_svg:
-            st.download_button(
-                "Download SVG",
-                st.session_state.fig_bytes["fig_i3_aucell_violins"]["svg"],
-                "fig_i3_aucell_violins.svg", "image/svg+xml",
-                key="dl_fig_i3_svg",
-            )
-        plt.close(fig_i3)
-
-        # I-4: Score histogram
-        st.subheader("Figure I-4: AUCell Score Distribution (All Cells)")
-        st.markdown(
-            "Global distribution of AUCell scores with percentile markers. "
-            "Cells above the 95th percentile are most likely part of the "
-            "bacTRAP target population."
-        )
-        fig_i4 = figure_aucell_histogram(
-            aucell_scores, double_column=double_column,
-        )
-        st.pyplot(fig_i4)
-        _cache_fig("fig_i4_aucell_histogram", fig_i4)
-
-        col_pdf, col_svg = st.columns(2)
-        with col_pdf:
-            st.download_button(
-                "Download PDF",
-                st.session_state.fig_bytes["fig_i4_aucell_histogram"]["pdf"],
-                "fig_i4_aucell_histogram.pdf", "application/pdf",
-                key="dl_fig_i4_pdf",
-            )
-        with col_svg:
-            st.download_button(
-                "Download SVG",
-                st.session_state.fig_bytes["fig_i4_aucell_histogram"]["svg"],
-                "fig_i4_aucell_histogram.svg", "image/svg+xml",
-                key="dl_fig_i4_svg",
-            )
-        plt.close(fig_i4)
-
     # ======================================================================
-    # TAB 8: Export
+    # TAB: Export
     # ======================================================================
-    with tab8:
+    with tab_export:
         st.header("Export All Results")
 
         st.subheader("Figures")

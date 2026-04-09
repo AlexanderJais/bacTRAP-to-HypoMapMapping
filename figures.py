@@ -85,7 +85,7 @@ def get_qualitative_palette(n: int) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Figure A: Correlation Barplot
+# Supplementary Figure S1: Correlation Barplot
 # ---------------------------------------------------------------------------
 
 def figure_correlation_barplot(
@@ -174,7 +174,7 @@ def figure_correlation_barplot(
 
 
 # ---------------------------------------------------------------------------
-# Figure B: UMAP Enrichment Map
+# Supplementary Figure S2: UMAP Enrichment Map
 # ---------------------------------------------------------------------------
 
 def figure_umap_enrichment(
@@ -287,7 +287,7 @@ def figure_umap_enrichment(
 
 
 # ---------------------------------------------------------------------------
-# Figure C: Marker Overlap Dot Plot
+# Supplementary Figure S4: Marker Overlap Dot Plot
 # ---------------------------------------------------------------------------
 
 def figure_dotplot(
@@ -393,7 +393,7 @@ def figure_dotplot(
 
 
 # ---------------------------------------------------------------------------
-# Figure D: Volcano-style Enrichment Plot (Fisher's test results)
+# Supplementary Figure S3: Volcano-style Enrichment Plot (Fisher's test results)
 # ---------------------------------------------------------------------------
 
 def figure_volcano_enrichment(
@@ -474,7 +474,7 @@ def figure_volcano_enrichment(
 
 
 # ---------------------------------------------------------------------------
-# Figure A (new): bacTRAP Gene Volcano Plot
+# bacTRAP Gene Volcano Plot (Data Overview)
 # ---------------------------------------------------------------------------
 
 def figure_bactrap_volcano(
@@ -590,7 +590,7 @@ def figure_bactrap_volcano(
 
 
 # ---------------------------------------------------------------------------
-# Figure E: Heatmap
+# Supplementary Figure S5: Heatmap
 # ---------------------------------------------------------------------------
 
 def figure_heatmap(
@@ -658,7 +658,7 @@ def figure_heatmap(
 
 
 # ---------------------------------------------------------------------------
-# Figure F: NNLS Deconvolution Barplot
+# Supplementary Figure S6: NNLS Deconvolution Barplot
 # ---------------------------------------------------------------------------
 
 def figure_nnls_barplot(
@@ -718,7 +718,7 @@ def figure_nnls_barplot(
 
 
 # ---------------------------------------------------------------------------
-# Figure G: GSEA Enrichment Curves
+# Supplementary Figure S7: GSEA Enrichment Curves
 # ---------------------------------------------------------------------------
 
 def figure_gsea_curves(
@@ -768,7 +768,7 @@ def figure_gsea_curves(
 
 
 # ---------------------------------------------------------------------------
-# Figure H: GSEA NES Barplot
+# Supplementary Figure S8: GSEA NES Barplot
 # ---------------------------------------------------------------------------
 
 def figure_gsea_barplot(
@@ -823,7 +823,7 @@ def figure_gsea_barplot(
 
 
 # ---------------------------------------------------------------------------
-# Figure I: AUCell UMAP
+# Main Figure 1a: AUCell UMAP
 # ---------------------------------------------------------------------------
 
 def figure_aucell_umap(
@@ -875,7 +875,7 @@ def figure_aucell_umap(
 
 
 # ---------------------------------------------------------------------------
-# Figure I-2: AUCell Cluster Barplot
+# Main Figure 1b: AUCell Cluster Barplot
 # ---------------------------------------------------------------------------
 
 def figure_aucell_cluster_barplot(
@@ -942,7 +942,7 @@ def figure_aucell_cluster_barplot(
 
 
 # ---------------------------------------------------------------------------
-# Figure I-3: AUCell Violin Plot (top clusters)
+# Main Figure 1c: AUCell Violin Plot (top clusters)
 # ---------------------------------------------------------------------------
 
 def figure_aucell_violins(
@@ -1008,7 +1008,7 @@ def figure_aucell_violins(
 
 
 # ---------------------------------------------------------------------------
-# Figure I-4: AUCell Score Histogram
+# Main Figure 1d: AUCell Score Histogram
 # ---------------------------------------------------------------------------
 
 def figure_aucell_histogram(
@@ -1057,7 +1057,7 @@ def figure_aucell_histogram(
 
 
 # ---------------------------------------------------------------------------
-# Figure J: Composite Ranking Heatmap
+# Main Figure 1e: Composite Consensus Ranking Heatmap
 # ---------------------------------------------------------------------------
 
 def figure_composite_ranking(

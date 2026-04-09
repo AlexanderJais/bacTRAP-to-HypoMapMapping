@@ -56,17 +56,22 @@ All analyses were implemented in Python 3.10+ using a custom Streamlit applicati
 
 ## Figure Legends
 
-**Figure 1. bacTRAP translational profiling identifies enriched transcripts in preoptic area neurons.**
-**(a)** Volcano plot of bacTRAP DESeq2 results showing log2 fold change (IP vs Input) against statistical significance (-log10 adjusted p-value) for all 26,426 matched genes. Red dots indicate significantly enriched genes (padj < 0.05, log2FC > 1); blue dots indicate significantly depleted genes. Pnoc (prepronociceptin) is highlighted. Dashed lines indicate significance thresholds.
-**(b)** UMAP projection of the HypoMap hypothalamic single-cell atlas (384,925 cells). Left panel: cell-type annotation at the C286 resolution level. Right panel: bacTRAP enrichment score computed as the z-scored mean expression of the top 50 enriched genes, projected onto each cell. Enrichment score color scale indicates relative enrichment (magma colormap).
-**(c)** Dot plot of the top bacTRAP-enriched genes across the highest-correlating HypoMap clusters. Dot size represents the fraction of cells expressing each gene (>0 threshold); color intensity represents mean expression level (viridis colormap). Clusters are ranked by Spearman correlation with the bacTRAP enrichment profile.
-**(d)** Preranked GSEA running enrichment score curves for the top 5 HypoMap clusters. All matched genes were ranked by bacTRAP log2 fold change (descending); running scores show the cumulative enrichment of each cluster's marker gene set along the ranked list. Normalized enrichment scores (NES) are indicated in the legend. Significance was assessed by permutation testing (1,000 permutations) with Benjamini-Hochberg correction.
+**Figure 1. AUCell enrichment analysis maps bacTRAP-enriched transcripts to specific HypoMap cell populations.**
+**(a)** AUCell enrichment scores projected onto the HypoMap UMAP embedding (384,925 cells). AUCell quantifies per-cell enrichment of the bacTRAP gene set using a rank-based area-under-the-curve approach within the top 5% of expressed genes per cell. Color scale (magma colormap) indicates AUCell score magnitude.
+**(b)** Mean AUCell score per HypoMap cluster (top 25 clusters shown), ranked by enrichment. Error bars represent standard error of the mean (SEM). Clusters where cells consistently express the bacTRAP-enriched gene set rank highest.
+**(c)** Violin plots showing the full distribution of AUCell scores within each of the top 15 clusters. Solid line indicates mean; dashed line indicates median. Clusters ordered by descending mean AUCell score.
+**(d)** Histogram of AUCell score distribution across all cells. Vertical lines indicate the 90th, 95th, and 99th percentiles, as well as the global mean. Cells above the 95th percentile are most likely part of the bacTRAP target population.
+**(e)** Composite consensus ranking across all analysis methods (Spearman correlation, Fisher's exact test, NNLS deconvolution, and GSEA). Each method's cluster scores were converted to percentile ranks (0–1) and averaged. Color intensity (YlOrRd) represents percentile score; composite scores are annotated to the right.
 
-**Extended Data Figures:**
-**(e)** Z-scored heatmap of mean expression for the top 30 enriched genes across the 20 highest-correlating clusters. Row-wise z-scoring highlights cluster-specific expression patterns. Rows are ordered by hierarchical clustering.
-**(f)** NNLS deconvolution weights representing the fractional contribution of each HypoMap cluster to the bacTRAP enrichment profile. Only clusters with non-zero weights are shown.
-**(g)** AUCell scores projected onto the HypoMap UMAP embedding. AUCell quantifies per-cell enrichment of the bacTRAP gene set using a rank-based area-under-the-curve approach within the top 5% of expressed genes per cell.
-**(h)** Horizontal barplot of GSEA normalized enrichment scores (NES) for the top 20 clusters. Red bars indicate clusters with significant enrichment (padj < 0.05); grey bars indicate non-significant clusters.
+**Supplementary Figures:**
+**(S1)** Horizontal barplot of top 20 HypoMap clusters ranked by Spearman correlation (ρ) with the bacTRAP log2FC enrichment profile. Color intensity indicates correlation strength. Hatched bars indicate clusters not significant by both Pearson and Spearman tests (p < 0.05).
+**(S2)** UMAP projection of the HypoMap single-cell atlas. Left panel: cell-type annotation. Right panel: bacTRAP enrichment score computed as the z-scored mean expression of the top 50 enriched genes, projected onto each cell (magma colormap).
+**(S3)** Volcano-style plot of marker gene overlap (Fisher's exact test). x-axis: log2(odds ratio); y-axis: -log10(p-value). Red points indicate clusters with significant overlap (p < 0.05). Top hits are labeled.
+**(S4)** Dot plot of the top bacTRAP-enriched genes across the highest-correlating HypoMap clusters. Dot size represents the fraction of cells expressing each gene (>0 threshold); color intensity represents mean expression level (viridis colormap).
+**(S5)** Z-scored heatmap of mean expression for the top 30 enriched genes across the 20 highest-correlating clusters. Row-wise z-scoring highlights cluster-specific expression patterns. Rows are ordered by hierarchical clustering (Ward's method).
+**(S6)** NNLS deconvolution weights representing the fractional contribution of each HypoMap cluster to the bacTRAP enrichment profile. Only clusters with non-zero weights are shown.
+**(S7)** Preranked GSEA running enrichment score curves for the top 5 HypoMap clusters. All matched genes were ranked by bacTRAP log2 fold change (descending); normalized enrichment scores (NES) are indicated in the legend. Significance was assessed by permutation testing (1,000 permutations) with Benjamini-Hochberg correction.
+**(S8)** Horizontal barplot of GSEA normalized enrichment scores (NES) for the top 20 clusters. Red bars indicate clusters with significant enrichment (padj < 0.05); grey bars indicate non-significant clusters.
 
 ---
 
