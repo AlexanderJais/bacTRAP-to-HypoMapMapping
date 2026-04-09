@@ -198,6 +198,25 @@ with st.spinner("Loading data..."):
     bactrap_df = load_bactrap(bactrap_file.strip())
     adata = load_hypomap(hypomap_file.strip())
 
+# Early UMAP sanity check — fail now rather than after minutes of analysis
+if not any(key in adata.obsm for key in ("X_umap", "X_UMAP")):
+    st.error(
+        "No UMAP coordinates found in HypoMap `.obsm` (expected `X_umap`). "
+        "UMAP projection is required for Figures 1a and S2. "
+        "Please provide an atlas that includes precomputed UMAP coordinates."
+    )
+    st.stop()
+
+# Early sanity check on bacTRAP required columns
+for _req_col in ("padj", "log2FoldChange"):
+    if _req_col not in bactrap_df.columns:
+        st.error(
+            f"Required column **`{_req_col}`** not found in the bacTRAP file. "
+            f"Available columns: `{list(bactrap_df.columns)}`. "
+            f"Expected DESeq2-style output with `padj` and `log2FoldChange` columns."
+        )
+        st.stop()
+
 # Annotation column selection
 ann_cols = get_annotation_columns(adata)
 if len(ann_cols) == 0:
@@ -222,6 +241,7 @@ annotation_col = st.sidebar.selectbox(
     "Annotation column",
     ann_cols,
     index=default_idx,
+    key=annotation_col_key,
     help="Select the cell-type annotation level from HypoMap .obs.",
 )
 
@@ -453,16 +473,8 @@ if run_button or st.session_state.analysis_done:
             rng = np.random.default_rng(42)
             sub_indices = np.sort(rng.choice(adata.n_obs, size=umap_subsample, replace=False))
 
-        # Get UMAP coordinates
-        umap_key = None
-        for key in ["X_umap", "X_UMAP"]:
-            if key in adata.obsm:
-                umap_key = key
-                break
-        if umap_key is None:
-            st.error("No UMAP coordinates found in HypoMap .obsm. Expected 'X_umap'.")
-            st.stop()
-
+        # Get UMAP coordinates (existence already verified at load time)
+        umap_key = "X_umap" if "X_umap" in adata.obsm else "X_UMAP"
         umap_coords = adata.obsm[umap_key]
         cell_labels = adata.obs[annotation_col].values.astype(str)
 

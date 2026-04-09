@@ -192,8 +192,11 @@ def compute_marker_genes(
 
     # Check if data needs normalization by sampling a small subset to
     # avoid the cost of computing max() on the full sparse matrix.
+    # Seeded for reproducibility so the normalize/log1p decision is stable.
     sample_size = min(1000, adata_work.n_obs)
-    sample_idx = np.random.choice(adata_work.n_obs, sample_size, replace=False)
+    sample_idx = np.random.default_rng(42).choice(
+        adata_work.n_obs, sample_size, replace=False
+    )
     X_sample = adata_work.X[sample_idx, :]
     if sparse.issparse(X_sample):
         sample_max = X_sample.max()
