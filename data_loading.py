@@ -197,15 +197,22 @@ def _detect_gene_column(bactrap_df: pd.DataFrame) -> str:
 
 @st.cache_resource(show_spinner=False)
 def _build_adata_gene_lookup(
-    adata: ad.AnnData, use_raw: bool = True,
+    _adata: ad.AnnData, use_raw: bool = True,
 ) -> Tuple[Dict[str, Tuple[str, int]], np.ndarray, bool]:
     """Build a comprehensive gene lookup from an AnnData object.
+
+    The leading underscore on ``_adata`` tells Streamlit not to attempt to
+    hash the AnnData argument (AnnData objects are not hashable by
+    Streamlit's caching machinery). Callers can still pass any AnnData
+    instance; the cached result is keyed by the remaining arguments and the
+    object's identity within the session.
 
     Returns:
         lookup: lowercase gene name -> (display_name, column_index)
         gene_names: array of resolved gene names
         is_raw: whether indices point into adata.raw.var
     """
+    adata = _adata
     has_raw = adata.raw is not None and use_raw
     logger.info("_build_adata_gene_lookup: has_raw=%s", has_raw)
     gene_names = get_gene_names_from_adata(adata, use_raw=has_raw)
