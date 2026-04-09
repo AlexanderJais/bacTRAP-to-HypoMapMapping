@@ -752,7 +752,13 @@ def compute_aucell_scores(
     # Number of top genes to consider per cell
     n_top = max(int(n_total_genes * top_fraction), n_query)
     n_top = min(n_top, n_total_genes)
-    max_auc = n_query * n_top
+    # Theoretical maximum of sum(cumsum(is_hit)) when all n_query query genes
+    # occupy the top n_query positions:
+    #   cumsum = [1, 2, ..., n_query, n_query, ..., n_query]  (n_top entries)
+    #   sum    = n_query*(n_query+1)/2 + n_query*(n_top - n_query)
+    #          = n_query * (n_top - (n_query - 1)/2)
+    # Note: n_top >= n_query is guaranteed above, so this is always positive.
+    max_auc = n_query * (n_top - (n_query - 1) / 2)
 
     # Process in cell chunks — vectorized within each chunk
     chunk_size = 5000
