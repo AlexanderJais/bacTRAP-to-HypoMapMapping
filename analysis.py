@@ -517,63 +517,6 @@ def fisher_overlap_test(
     return df
 
 
-def compute_enrichment_score(
-    adata,
-    gene_names: List[str],
-    score_name: str = "bacTRAP_enrichment",
-    use_raw: bool = True,
-) -> np.ndarray:
-    """
-    Compute a bacTRAP enrichment score for each cell.
-
-    This is a z-scored mean expression of the given gene set across all cells.
-    Gene lookup uses the **raw** layer when available so that all genes (not
-    just the HVG-filtered subset in ``adata.var``) are considered.
-    """
-    # Determine expression source
-    if use_raw and adata.raw is not None:
-        X = adata.raw.X
-        source_gene_names = get_gene_names_from_adata(adata, use_raw=True)
-    else:
-        X = adata.X
-        source_gene_names = get_gene_names_from_adata(adata)
-
-    # Build case-insensitive lookup: gene symbol -> column index
-    gene_lower_to_idx = {}
-    for i, g in enumerate(source_gene_names):
-        key = str(g).strip().lower()
-        if key and key != "nan":
-            gene_lower_to_idx[key] = i
-
-    # Map input genes to expression matrix column indices
-    gene_idx = []
-    for g in gene_names:
-        g_lower = str(g).strip().lower()
-        if g_lower in gene_lower_to_idx:
-            gene_idx.append(gene_lower_to_idx[g_lower])
-
-    logger.info("compute_enrichment_score: %d/%d genes found in atlas, %d cells",
-                len(gene_idx), len(gene_names), adata.n_obs)
-    if len(gene_idx) == 0:
-        logger.warning("  no genes found — returning zero scores")
-        return np.zeros(adata.n_obs)
-
-    X_sub = X[:, gene_idx]
-    if sparse.issparse(X_sub):
-        X_sub = np.asarray(X_sub.toarray())
-    else:
-        X_sub = np.asarray(X_sub)
-
-    scores = X_sub.mean(axis=1).flatten()
-
-    # Z-score
-    std = np.std(scores)
-    if std > 0:
-        scores = (scores - np.mean(scores)) / std
-
-    return scores
-
-
 def compute_zscore_heatmap_data(
     cluster_mean_expr: pd.DataFrame,
     top_genes: List[str],

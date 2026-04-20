@@ -248,7 +248,6 @@ from analysis import (
     compute_marker_genes,
     load_precomputed_markers,
     fisher_overlap_test,
-    compute_enrichment_score,
     compute_zscore_heatmap_data,
     compute_nnls_deconvolution,
     compute_gsea_enrichment,
@@ -506,10 +505,9 @@ if run_button or st.session_state.analysis_done:
         if len(top_enriched_genes) == 0:
             st.warning(
                 f"No genes pass enrichment thresholds (padj < {padj_cutoff}, "
-                f"log₂FC > {log2fc_cutoff}). UMAP enrichment score will be zero. "
-                "Try relaxing the cutoffs."
+                f"log₂FC > {log2fc_cutoff}). AUCell and all downstream "
+                "scores will be zero — try relaxing the cutoffs."
             )
-        enrichment_scores = compute_enrichment_score(adata, top_enriched_genes)
         progress.progress(55, text="Preparing figures...")
 
         # ---- Fraction expressing for dotplot ----
@@ -616,7 +614,6 @@ if run_button or st.session_state.analysis_done:
             "corr_df": corr_df,
             "markers": markers,
             "fisher_df": fisher_df,
-            "enrichment_scores": enrichment_scores,
             "enriched_gene_indices": enriched_gene_indices,
             "top_clusters_corr": top_clusters_corr,
             "frac_expr": frac_expr,
@@ -650,7 +647,6 @@ if run_button or st.session_state.analysis_done:
         corr_df = _c["corr_df"]
         markers = _c["markers"]
         fisher_df = _c["fisher_df"]
-        enrichment_scores = _c["enrichment_scores"]
         enriched_gene_indices = _c["enriched_gene_indices"]
         top_clusters_corr = _c["top_clusters_corr"]
         frac_expr = _c["frac_expr"]

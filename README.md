@@ -239,7 +239,6 @@ bacTRAP-to-HypoMapMapping/
 - `compute_marker_genes()` -- Wilcoxon-based marker detection via scanpy (Ensembl-to-symbol conversion)
 - `load_precomputed_markers()` -- attempts to read `.uns['rank_genes_groups']`
 - `fisher_overlap_test()` -- one-sided Fisher's exact test with FDR correction
-- `compute_enrichment_score()` -- per-cell z-scored mean expression
 - `compute_zscore_heatmap_data()` -- z-scored expression matrix for heatmaps
 - `compute_nnls_deconvolution()` -- non-negative least squares decomposition
 - `compute_gsea_enrichment()` -- preranked GSEA with permutation-based p-values
