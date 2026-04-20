@@ -74,6 +74,8 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 | Markers per cluster | Number of marker genes per cluster for overlap test | 100 |
 | Min cells per cluster | Minimum cells required to include a cluster | 10 |
 | UMAP subsample | Number of cells to subsample for UMAP rendering | 50,000 |
+| Cre-driver gene | Gene used for the Cre-driver Check sanity panel | `Pnoc` |
+| Expression threshold (fraction) | Min fraction of cells expressing the Cre-driver gene to count a cluster as "expressing" | 0.05 |
 | Figure width | Single column (89 mm) or double column (183 mm) | Single |
 
 ### Tabs
@@ -82,6 +84,7 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 |---|---|
 | **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, bacTRAP volcano plot, gene matching diagnostics |
 | **AUCell (Main Figure)** | Main Figure 1a-1e: AUCell UMAP, per-cluster barplot, violin distributions, score histogram, and composite consensus ranking |
+| **Cre-driver Check** | Sanity check: per-cluster expression of the Cre-driver gene (default `Pnoc`) across the top-ranked clusters from the composite consensus, with a configurable "fraction expressing" threshold to flag mapping hits that may reflect Cre lineage tracing rather than current expression |
 | **Correlation (Suppl.)** | Ranked cluster table + correlation barplot (Supplementary Figure S1) |
 | **UMAP Projection (Suppl.)** | Two-panel UMAP: cell types + enrichment score (Supplementary Figure S2) |
 | **Marker Overlap (Suppl.)** | Fisher's test table + Fisher volcano plot + dot plot (Supplementary Figures S3, S4) |

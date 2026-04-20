@@ -1124,6 +1124,122 @@ def figure_composite_ranking(
 
 
 # ---------------------------------------------------------------------------
+# Sanity-check figure: Cre-driver gene expression across top-ranked clusters
+# ---------------------------------------------------------------------------
+
+def figure_marker_gene_diagnostic(
+    gene_stats: pd.DataFrame,
+    cluster_order: List[str],
+    gene_name: str = "Pnoc",
+    fraction_threshold: float = 0.05,
+    double_column: bool = True,
+) -> plt.Figure:
+    """
+    Two-panel sanity-check plot for a Cre-driver / marker gene.
+
+    For each cluster in *cluster_order* (typically the top hits from the
+    composite ranking) two horizontal bars are drawn:
+
+      * Left  — mean log-normalised expression of *gene_name*
+      * Right — fraction of cells with non-zero counts for *gene_name*
+
+    A vertical reference line on the fraction panel marks
+    *fraction_threshold*; bars meeting both "ranked top" AND
+    "fraction ≥ threshold" are filled in saturated colour, the rest are
+    greyed-out — making it easy to spot top-ranked clusters that fail the
+    Pnoc check (likely lineage-tracing artefacts, dropout, or background).
+
+    Parameters
+    ----------
+    gene_stats : DataFrame
+        Output of ``compute_single_gene_cluster_stats`` — index = cluster,
+        columns include ``mean_expr`` and ``fraction_expressing``.
+    cluster_order : list[str]
+        Clusters to display (top-down, e.g. the top 20 from composite
+        ranking).  Missing clusters are skipped silently.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    available = [c for c in cluster_order if c in gene_stats.index]
+    if len(available) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, f"{gene_name} not detected in selected clusters",
+                ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    # Reverse so the top-ranked cluster sits at the top of the plot
+    df = gene_stats.loc[available, ["mean_expr", "fraction_expressing"]].iloc[::-1]
+    n_bars = len(df)
+
+    height = max(2.0, n_bars * 0.22 + 1.0)
+    fig, (ax_mean, ax_frac) = plt.subplots(
+        1, 2, figsize=(width, height), sharey=True,
+        gridspec_kw={"wspace": 0.08},
+    )
+
+    pass_mask = (df["fraction_expressing"] >= fraction_threshold).values
+    color_pass = "#762a83"   # saturated purple, colorblind-safe
+    color_fail = "#bdbdbd"   # neutral grey
+    bar_colors = np.where(pass_mask, color_pass, color_fail)
+
+    # --- Panel 1: mean expression ----------------------------------------
+    ax_mean.barh(
+        range(n_bars), df["mean_expr"].values,
+        color=bar_colors, edgecolor="none", height=0.7,
+    )
+    ax_mean.set_yticks(range(n_bars))
+    ax_mean.set_yticklabels(df.index, fontsize=5)
+    ax_mean.invert_xaxis()                       # bars grow leftward
+    ax_mean.yaxis.tick_right()                   # labels live in the gutter
+    ax_mean.tick_params(axis="y", which="both", length=0, pad=2)
+    ax_mean.set_xlabel(f"Mean {gene_name} expression\n(log-norm)")
+    # Tighten x-limit so the label row reads as 0 → max
+    mean_max = float(df["mean_expr"].max()) if n_bars else 0.0
+    if mean_max > 0:
+        ax_mean.set_xlim(mean_max * 1.05, 0)
+
+    # --- Panel 2: fraction expressing ------------------------------------
+    ax_frac.barh(
+        range(n_bars), df["fraction_expressing"].values,
+        color=bar_colors, edgecolor="none", height=0.7,
+    )
+    ax_frac.axvline(
+        fraction_threshold, color="black", linewidth=0.5,
+        linestyle="--", zorder=4,
+    )
+    ax_frac.set_xlabel(f"Fraction of cells\nexpressing {gene_name}")
+    ax_frac.set_xlim(0, max(1.0, float(df["fraction_expressing"].max()) * 1.1))
+    # Hide redundant y tick labels on the right panel — they live with
+    # the left axis (rotated to the right side via yaxis.tick_right).
+    ax_frac.tick_params(axis="y", which="both", length=0, labelleft=False)
+
+    # Annotate fraction values
+    for i, frac in enumerate(df["fraction_expressing"].values):
+        ax_frac.text(
+            frac + 0.01, i, f"{frac*100:.0f}%",
+            va="center", ha="left", fontsize=5,
+        )
+
+    fig.suptitle(
+        f"{gene_name} expression across top-ranked clusters "
+        f"(threshold = {fraction_threshold*100:.0f}%)",
+        fontsize=8, fontweight="bold", y=0.995,
+    )
+
+    # Legend: colour-coded pass / fail
+    pass_patch = plt.Rectangle((0, 0), 1, 1, color=color_pass)
+    fail_patch = plt.Rectangle((0, 0), 1, 1, color=color_fail)
+    ax_frac.legend(
+        [pass_patch, fail_patch],
+        [f"≥ {fraction_threshold*100:.0f}% expressing", "below threshold"],
+        loc="lower right", fontsize=5, frameon=False, handlelength=1.2,
+    )
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
 # Export utilities
 # ---------------------------------------------------------------------------
 

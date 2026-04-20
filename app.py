@@ -114,6 +114,30 @@ hide_unassigned = st.sidebar.checkbox(
 )
 
 st.sidebar.markdown("---")
+st.sidebar.subheader("Cre-driver Sanity Check")
+sanity_gene = st.sidebar.text_input(
+    "Cre-driver gene",
+    value="Pnoc",
+    help=(
+        "Marker gene used as a confidence check on the mapping — typically "
+        "the Cre-driver of the bacTRAP line (e.g. Pnoc for Pnoc-Cre;NuTRAP). "
+        "Top-ranked clusters that also express this gene are high-confidence; "
+        "those that don't may reflect developmental Cre lineage tracing, "
+        "snRNA-seq dropout, or background. Note: snRNA-seq dropout for "
+        "neuropeptides means 'not detected' ≠ 'not expressed'."
+    ),
+)
+sanity_fraction_threshold = st.sidebar.slider(
+    "Expression threshold (fraction)",
+    0.0, 0.5, 0.05, 0.01, format="%.2f",
+    help=(
+        "Minimum fraction of cells expressing the Cre-driver gene for a "
+        "cluster to count as 'expressing'. 5% is a permissive default that "
+        "tolerates dropout."
+    ),
+)
+
+st.sidebar.markdown("---")
 st.sidebar.subheader("Figure Settings")
 fig_width_mode = st.sidebar.radio(
     "Figure width", ["Single column (89mm)", "Double column (183mm)"],
@@ -180,6 +204,7 @@ from data_loading import (
     match_genes,
     compute_cluster_mean_expression,
     compute_fraction_expressing,
+    compute_single_gene_cluster_stats,
     get_gene_names_from_adata,
     _detect_gene_column,
     _build_adata_gene_lookup,
@@ -214,6 +239,7 @@ from figures import (
     figure_aucell_violins,
     figure_aucell_histogram,
     figure_composite_ranking,
+    figure_marker_gene_diagnostic,
     fig_to_bytes,
 )
 
@@ -318,9 +344,10 @@ _gene_col_for_matching = "_index" if gene_col_selection == "(use row index)" els
 # Progress bar placeholder — rendered above tabs so it's always visible
 progress_placeholder = st.empty()
 
-tab1, tab_aucell, tab3, tab4, tab5, tab6, tab7, tab8, tab_export = st.tabs([
+tab1, tab_aucell, tab_sanity, tab3, tab4, tab5, tab6, tab7, tab8, tab_export = st.tabs([
     "📊 Data Overview",
     "⭐ AUCell (Main Figure)",
+    "🔍 Cre-driver Check",
     "📈 Correlation (Suppl.)",
     "🗺️ UMAP Projection (Suppl.)",
     "🔬 Marker Overlap (Suppl.)",
@@ -910,6 +937,198 @@ if run_button or st.session_state.analysis_done:
             plt.close(fig_1e)
         else:
             st.warning("No composite ranking data available.")
+
+    # ======================================================================
+    # TAB: Cre-driver Sanity Check
+    # ======================================================================
+    with tab_sanity:
+        st.header(f"Cre-driver Sanity Check: {sanity_gene}")
+        st.markdown(
+            f"In a **{sanity_gene}-Cre;NuTRAP** experiment we'd expect the "
+            f"top-ranked HypoMap clusters to express *{sanity_gene}*. This panel "
+            f"shows mean expression and fraction of cells expressing "
+            f"*{sanity_gene}* across the top-ranked clusters from the "
+            f"composite consensus."
+        )
+        st.info(
+            "**Caveats — read before interpreting:** "
+            "(1) Cre-lox is permanent lineage tracing — any cell that ever "
+            f"expressed *{sanity_gene}* during development is labelled, even "
+            f"if current mRNA is undetectable. (2) HypoMap is single-nucleus "
+            f"data; neuropeptides like *{sanity_gene}* are notoriously prone "
+            "to dropout. (3) Atlas expression is a snapshot; *Pnoc* is "
+            "state-dependent (feeding, stress, estrous). Use this as a "
+            "**confidence weight**, not a hard filter."
+        )
+
+        # ---- Lookup Cre-driver gene in atlas (cached per gene/annotation) ----
+        sanity_cache_key = (
+            hypomap_file.strip(), annotation_col,
+            min_cells_per_cluster, sanity_gene.strip().lower(),
+        )
+        _sanity_cached = st.session_state.get("_sanity_cache")
+        if _sanity_cached is not None and _sanity_cached.get("key") == sanity_cache_key:
+            sanity_stats = _sanity_cached["stats"]
+        else:
+            with st.spinner(f"Computing per-cluster {sanity_gene} expression..."):
+                sanity_stats = compute_single_gene_cluster_stats(
+                    adata, sanity_gene.strip(), annotation_col,
+                    adata_gene_lookup=_adata_lookup,
+                    has_raw=_adata_has_raw,
+                    min_cells=min_cells_per_cluster,
+                    normalize=True,
+                )
+            st.session_state["_sanity_cache"] = {
+                "key": sanity_cache_key, "stats": sanity_stats,
+            }
+
+        if sanity_stats is None or len(sanity_stats) == 0:
+            st.error(
+                f"**`{sanity_gene}`** was not found in the HypoMap atlas. "
+                "Check the spelling and capitalization (mouse symbols are "
+                "title-cased: `Pnoc`, not `PNOC` or `pnoc`)."
+            )
+        else:
+            # ---- Cluster ordering: composite ranking, fall back to Pnoc mean ----
+            if len(composite_df) > 0:
+                ranked_clusters = composite_df["cluster"].astype(str).tolist()
+                rank_source = "composite consensus"
+            elif len(corr_df) > 0:
+                ranked_clusters = corr_df["cluster"].astype(str).tolist()
+                rank_source = "Spearman correlation"
+            else:
+                ranked_clusters = sanity_stats.sort_values(
+                    "mean_expr", ascending=False,
+                ).index.tolist()
+                rank_source = f"{sanity_gene} expression (no mapping ranking available)"
+
+            top_n_sanity = st.slider(
+                "Top N clusters to display", 5, 50, 20, 1,
+                key="sanity_top_n",
+            )
+            top_clusters_sanity = ranked_clusters[:top_n_sanity]
+
+            # Build the merged display table
+            sanity_table = sanity_stats.loc[
+                [c for c in top_clusters_sanity if c in sanity_stats.index]
+            ].copy()
+            # Add rank column from composite (or whichever source we used)
+            sanity_table["rank"] = [
+                ranked_clusters.index(c) + 1 if c in ranked_clusters else np.nan
+                for c in sanity_table.index
+            ]
+            sanity_table = sanity_table.sort_values("rank")
+            sanity_table["passes_threshold"] = (
+                sanity_table["fraction_expressing"] >= sanity_fraction_threshold
+            )
+
+            # ---- Summary metric ----
+            n_pass = int(sanity_table["passes_threshold"].sum())
+            n_total = len(sanity_table)
+            atlas_median_frac = float(sanity_stats["fraction_expressing"].median())
+
+            mcol1, mcol2, mcol3 = st.columns(3)
+            with mcol1:
+                st.metric(
+                    f"Top-{n_total} clusters expressing {sanity_gene}",
+                    f"{n_pass} / {n_total}",
+                    help=(
+                        f"Clusters where ≥{sanity_fraction_threshold*100:.0f}% "
+                        "of cells have non-zero counts for the Cre-driver gene."
+                    ),
+                )
+            with mcol2:
+                st.metric(
+                    f"Atlas-wide median fraction expressing",
+                    f"{atlas_median_frac*100:.1f}%",
+                    help=(
+                        "Median across ALL clusters in the atlas — useful "
+                        "baseline for judging dropout."
+                    ),
+                )
+            with mcol3:
+                top_frac = float(sanity_table["fraction_expressing"].max()) if n_total else 0.0
+                st.metric(
+                    f"Highest fraction in top-{n_total}",
+                    f"{top_frac*100:.1f}%",
+                )
+
+            st.caption(f"Cluster ordering: **{rank_source}**.")
+
+            # ---- Diagnostic figure ----
+            st.subheader(f"Figure: {sanity_gene} expression across top-ranked clusters")
+            fig_sanity = figure_marker_gene_diagnostic(
+                sanity_stats, top_clusters_sanity,
+                gene_name=sanity_gene,
+                fraction_threshold=sanity_fraction_threshold,
+                double_column=True,
+            )
+            st.pyplot(fig_sanity)
+            _cache_fig("fig_sanity_check", fig_sanity)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_sanity_check"]["pdf"],
+                    f"fig_sanity_{sanity_gene.lower()}.pdf", "application/pdf",
+                    key="dl_fig_sanity_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_sanity_check"]["svg"],
+                    f"fig_sanity_{sanity_gene.lower()}.svg", "image/svg+xml",
+                    key="dl_fig_sanity_svg",
+                )
+            plt.close(fig_sanity)
+
+            # ---- Detailed table ----
+            st.subheader(f"Per-cluster {sanity_gene} expression (top {n_total})")
+
+            display_table = sanity_table[[
+                "rank", "mean_expr", "fraction_expressing", "passes_threshold",
+            ]].copy()
+            display_table.columns = [
+                "Composite rank", f"Mean {sanity_gene} (log-norm)",
+                f"Fraction expressing {sanity_gene}",
+                f"≥ {sanity_fraction_threshold*100:.0f}% threshold",
+            ]
+
+            def _highlight_fail(row):
+                col = f"≥ {sanity_fraction_threshold*100:.0f}% threshold"
+                if col in row.index and not row[col]:
+                    return ["background-color: #fff3cd"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(
+                display_table.style.apply(_highlight_fail, axis=1).format({
+                    "Composite rank": "{:.0f}",
+                    f"Mean {sanity_gene} (log-norm)": "{:.3f}",
+                    f"Fraction expressing {sanity_gene}": "{:.1%}",
+                }),
+                use_container_width=True,
+            )
+
+            st.caption(
+                "Highlighted rows = top-ranked clusters that **do not** pass "
+                "the expression threshold. Investigate these: developmental "
+                "lineage tracing, dropout, or potential artefact."
+            )
+
+            # ---- Download full table ----
+            full_table = sanity_stats.copy()
+            full_table["rank_in_mapping"] = [
+                ranked_clusters.index(c) + 1 if c in ranked_clusters else np.nan
+                for c in full_table.index
+            ]
+            full_table = full_table.reset_index()
+            st.download_button(
+                f"Download full {sanity_gene} per-cluster table (CSV)",
+                full_table.to_csv(index=False).encode(),
+                f"sanity_check_{sanity_gene.lower()}.csv", "text/csv",
+                key="dl_sanity_csv",
+            )
 
     # ======================================================================
     # TAB 3: Correlation Analysis (Supplementary)

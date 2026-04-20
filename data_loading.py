@@ -748,3 +748,73 @@ def compute_fraction_expressing(
     return df
 
 
+def compute_single_gene_cluster_stats(
+    adata: ad.AnnData,
+    gene_name: str,
+    annotation_col: str,
+    adata_gene_lookup: Dict[str, Tuple[str, int]],
+    has_raw: bool,
+    min_cells: int = 10,
+    normalize: bool = True,
+    threshold: float = 0.0,
+) -> Optional[pd.DataFrame]:
+    """
+    Sanity-check helper: per-cluster mean expression and fraction expressing
+    for a single named gene (e.g. ``"Pnoc"`` for Pnoc-Cre lines).
+
+    Indices in ``adata_gene_lookup`` point into ``adata.raw.var`` when
+    ``has_raw`` is True, otherwise into ``adata.var`` — this mirrors
+    ``_build_adata_gene_lookup``.
+
+    Returns a DataFrame indexed by cluster with columns:
+        - ``mean_expr`` (log-normalized when ``normalize=True``)
+        - ``fraction_expressing`` (fraction of cells with raw count > threshold)
+        - ``gene`` (the resolved display name)
+
+    Returns ``None`` when the gene is absent from the atlas.
+    """
+    key = str(gene_name).strip().lower()
+    if not key or key not in adata_gene_lookup:
+        logger.info("compute_single_gene_cluster_stats: '%s' not found in atlas", gene_name)
+        return None
+
+    display_name, idx = adata_gene_lookup[key]
+    logger.info("compute_single_gene_cluster_stats: '%s' -> '%s' (idx=%d, in_raw=%s)",
+                gene_name, display_name, idx, has_raw)
+
+    use_raw = has_raw
+    indices_in_raw = has_raw
+
+    mean_df = compute_cluster_mean_expression(
+        adata, [idx], annotation_col,
+        min_cells=min_cells,
+        use_raw=use_raw,
+        indices_in_raw=indices_in_raw,
+        normalize=normalize,
+    )
+    frac_df = compute_fraction_expressing(
+        adata, [idx], annotation_col,
+        min_cells=min_cells,
+        use_raw=use_raw,
+        threshold=threshold,
+        indices_in_raw=indices_in_raw,
+    )
+
+    if mean_df.empty or frac_df.empty:
+        return None
+
+    # Both DataFrames have one row (the gene); take the first row as a Series.
+    mean_series = mean_df.iloc[0]
+    frac_series = frac_df.iloc[0]
+
+    # Align on cluster name (column names of both source frames).
+    common = mean_series.index.intersection(frac_series.index)
+    result = pd.DataFrame({
+        "mean_expr": mean_series.loc[common].astype(float),
+        "fraction_expressing": frac_series.loc[common].astype(float),
+    })
+    result.index.name = "cluster"
+    result["gene"] = display_name
+    return result
+
+
