@@ -1259,21 +1259,24 @@ if run_button or st.session_state.analysis_done:
     # TAB 4: UMAP Projection (Supplementary)
     # ======================================================================
     with tab4:
-        st.header("Supplementary: UMAP Enrichment Projection")
+        st.header("Supplementary: UMAP AUCell Projection")
         st.markdown(
-            f"bacTRAP enrichment score projected onto the HypoMap UMAP. "
+            f"AUCell enrichment score projected onto the HypoMap UMAP "
+            f"alongside the cell-type annotation for side-by-side comparison. "
             f"Score computed from the top **{len(top_enriched_genes)}** enriched "
             f"genes (padj < {padj_cutoff}, log₂FC > {log2fc_cutoff})."
         )
 
-        st.subheader("Supplementary Figure S2: UMAP Enrichment Map")
+        st.subheader("Supplementary Figure S2: UMAP AUCell Map")
         fig_b = figure_umap_enrichment(
             umap_coords=umap_coords,
             cell_labels=cell_labels,
-            enrichment_scores=enrichment_scores,
+            enrichment_scores=aucell_scores,
             double_column=True,
             point_size=0.3,
             subsample_idx=sub_indices,
+            score_title="AUCell enrichment score",
+            score_label="AUCell score",
         )
         st.pyplot(fig_b)
         _cache_fig("fig_s2_umap_enrichment", fig_b)

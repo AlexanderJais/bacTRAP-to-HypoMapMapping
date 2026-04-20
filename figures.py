@@ -185,9 +185,15 @@ def figure_umap_enrichment(
     point_size: float = 0.3,
     subsample_idx: Optional[np.ndarray] = None,
     max_legend_items: int = 20,
+    score_title: str = "bacTRAP enrichment score (PoA)",
+    score_label: str = "Enrichment score",
 ) -> plt.Figure:
     """
     Two-panel UMAP: left colored by cell-type annotation, right by enrichment score.
+
+    *score_title* / *score_label* let the caller override the right-panel
+    title and colorbar text so the same function can render either the
+    z-scored mean signature or the AUCell score without duplicating code.
     """
     logger.info("figure_umap_enrichment: %d cells, %d unique labels, subsample=%s",
                 len(umap_coords), len(np.unique(cell_labels)),
@@ -273,14 +279,14 @@ def figure_umap_enrichment(
     )
     ax2.set_xlabel("UMAP1")
     ax2.set_ylabel("UMAP2")
-    ax2.set_title("bacTRAP enrichment score (PoA)")
+    ax2.set_title(score_title)
     ax2.set_xticks([])
     ax2.set_yticks([])
     for spine in ax2.spines.values():
         spine.set_visible(False)
 
     cbar = fig.colorbar(sc, ax=ax2, shrink=0.7, aspect=20, pad=0.02)
-    cbar.set_label("Enrichment score", fontsize=6)
+    cbar.set_label(score_label, fontsize=6)
     cbar.ax.tick_params(labelsize=5)
 
     return fig
