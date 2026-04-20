@@ -341,10 +341,16 @@ if run_button or st.session_state.analysis_done:
         progress.progress(10, text="Genes matched. Computing cluster means...")
 
         # ---- Cluster mean expression ----
+        # Explicit normalize=True: the raw layer holds counts, and downstream
+        # correlation / NNLS require log-normalized means in comparable space.
+        # Leaving it on auto is unsafe when the gene subset is sparse (the
+        # heuristic samples only the selected genes and can falsely decide
+        # the data is already normalized — see the second call below).
         gene_indices = [gene_to_idx[g] for g in matched_genes]
         cluster_mean_expr = compute_cluster_mean_expression(
             adata, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
             indices_in_raw=matched_in_raw,
+            normalize=True,
         )
         progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
 
@@ -415,10 +421,15 @@ if run_button or st.session_state.analysis_done:
             min_cells=min_cells_per_cluster,
             indices_in_raw=matched_in_raw,
         )
+        # Explicit normalize=True — top_enriched_genes are typically sparse,
+        # cell-type-specific markers (e.g. neuropeptides), so the auto-detect
+        # heuristic sees a low sample max and skips normalisation, leaving
+        # the dotplot in raw-count space while correlation/NNLS use log-norm.
         enriched_mean_expr = compute_cluster_mean_expression(
             adata, enriched_gene_indices, annotation_col,
             min_cells=min_cells_per_cluster,
             indices_in_raw=matched_in_raw,
+            normalize=True,
         )
 
         # ---- Z-score heatmap data ----
@@ -846,8 +857,10 @@ if run_button or st.session_state.analysis_done:
                 n_total = len(corr_df)
                 st.caption(
                     f"**{n_sig}/{n_total}** clusters significant by both Pearson and "
-                    f"Spearman (p < 0.05). Rows where Pearson is not significant are "
-                    f"highlighted — concordance between both tests is stronger evidence."
+                    f"Spearman (BH-FDR < 0.05 across clusters). Rows failing the dual "
+                    f"test are highlighted — concordance between parametric and rank-"
+                    f"based correlations under multiple-testing correction is stronger "
+                    f"evidence than either nominal p-value alone."
                 )
 
                 def _highlight_nonsig(row):
@@ -858,8 +871,10 @@ if run_button or st.session_state.analysis_done:
                 styled = corr_df.style.apply(_highlight_nonsig, axis=1).format({
                     "pearson_r": "{:.4f}",
                     "pearson_pval": "{:.2e}",
+                    "pearson_padj": "{:.2e}",
                     "spearman_r": "{:.4f}",
                     "spearman_pval": "{:.2e}",
+                    "spearman_padj": "{:.2e}",
                 })
             else:
                 styled = corr_df.style.format({

@@ -32,17 +32,22 @@ def compute_enrichment_correlation(
     enrichment_col: str = "log2FoldChange",
 ) -> pd.DataFrame:
     """
-    Compute Pearson and Spearman correlation between bacTRAP enrichment
-    profile and each cluster's mean expression profile.
+    Compute Pearson and Spearman correlation between the bacTRAP enrichment
+    profile and each cluster's *specificity* profile.
 
-    Args:
-        bactrap_matched: matched bacTRAP data with _hypomap_gene_name column
-        cluster_mean_expr: DataFrame (genes x clusters) of mean expression
-        enrichment_col: column in bactrap_matched to use as enrichment metric
+    ``cluster_mean_expr`` is row-standardised (z-scored across clusters per
+    gene) before correlating.  Without this step, correlation against raw
+    log-mean expression systematically goes negative: highly cell-type-
+    specific markers have large log2FC but low across-cluster *mean*
+    expression (because even the target cluster contains many cells that
+    don't express them), while low-log2FC housekeeping genes have high mean
+    everywhere.  Z-scoring per gene converts "how highly expressed" into
+    "how cluster-specific", which is what the log2FC axis is measuring on
+    the bacTRAP side.
 
-    Returns:
-        DataFrame with columns: cluster, pearson_r, pearson_pval,
-        spearman_r, spearman_pval, sorted by spearman_r descending.
+    Per-cluster p-values are corrected across clusters using Benjamini–
+    Hochberg FDR, and significance flags use the adjusted values so the
+    "both_significant" column reflects multiple-testing-controlled calls.
     """
     logger.info("compute_enrichment_correlation: %d bacTRAP genes, %d expr genes, %d clusters",
                 len(bactrap_matched), len(cluster_mean_expr), len(cluster_mean_expr.columns))
@@ -88,6 +93,31 @@ def compute_enrichment_correlation(
             "n_genes",
         ])
 
+    # Row-standardise expression across clusters per gene so correlation
+    # measures cluster *specificity* rather than absolute expression.
+    expr_values = expr_sub.values.astype(float)
+    row_mean = expr_values.mean(axis=1, keepdims=True)
+    row_std = expr_values.std(axis=1, keepdims=True)
+    informative = (row_std.ravel() > 1e-8)
+    n_uninformative = int((~informative).sum())
+    if n_uninformative > 0:
+        logger.info("  dropping %d/%d genes with zero cross-cluster variance",
+                    n_uninformative, len(informative))
+        expr_values = expr_values[informative]
+        row_mean = row_mean[informative]
+        row_std = row_std[informative]
+        enrichment = enrichment[informative]
+    if len(enrichment) < 3:
+        logger.warning("  <3 informative genes — skipping correlation")
+        return pd.DataFrame(columns=[
+            "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
+            "n_genes",
+        ])
+    expr_z = (expr_values - row_mean) / row_std
+    expr_sub = pd.DataFrame(
+        expr_z, index=expr_sub.index[informative], columns=expr_sub.columns,
+    )
+
     results = []
     for cluster in expr_sub.columns:
         cluster_expr = expr_sub[cluster].values.astype(float)
@@ -112,13 +142,22 @@ def compute_enrichment_correlation(
 
     df = pd.DataFrame(results)
     if len(df) > 0:
+        # BH-FDR across clusters — without this, "significance" is inflated
+        # because each cluster's p-value is independently computed over
+        # ~hundreds of genes and many will cross p<0.05 under weak signal.
+        from statsmodels.stats.multitest import multipletests
+        _, pearson_padj, _, _ = multipletests(df["pearson_pval"].values, method="fdr_bh")
+        _, spearman_padj, _, _ = multipletests(df["spearman_pval"].values, method="fdr_bh")
+        df["pearson_padj"] = pearson_padj
+        df["spearman_padj"] = spearman_padj
         df = df.sort_values("spearman_r", ascending=False).reset_index(drop=True)
-        # Flag clusters where both Pearson and Spearman are significant —
-        # concordance between parametric and rank-based tests is stronger evidence.
-        df["both_significant"] = (df["pearson_pval"] < 0.05) & (df["spearman_pval"] < 0.05)
+        # Flag clusters where both Pearson and Spearman pass FDR — concordance
+        # between parametric and rank-based tests under multiple-testing
+        # correction is stronger evidence than either nominal p-value alone.
+        df["both_significant"] = (df["pearson_padj"] < 0.05) & (df["spearman_padj"] < 0.05)
         n_both = int(df["both_significant"].sum())
         logger.info("  correlation result: %d clusters, top spearman_r=%.4f (%s), "
-                    "%d/%d significant by both Pearson and Spearman (p<0.05)",
+                    "%d/%d significant by both Pearson and Spearman (FDR<0.05)",
                     len(df), df["spearman_r"].iloc[0], df["cluster"].iloc[0],
                     n_both, len(df))
     else:
