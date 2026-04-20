@@ -360,15 +360,32 @@ def match_genes(
     bactrap_matched = bactrap_matched.reset_index(drop=True)
     bactrap_matched["_hypomap_gene_name"] = matched_gene_names
 
-    # Deduplicate: keep first occurrence when multiple bacTRAP rows map to
-    # the same HypoMap gene (e.g. multiple Ensembl IDs → same symbol).
+    # Deduplicate: when multiple bacTRAP rows map to the same HypoMap gene
+    # (e.g. multiple Ensembl IDs → same symbol), keep the row with the
+    # strongest signal rather than the arbitrary first occurrence.  Sort
+    # order: smallest padj, then largest |log2FC|, with NaN padj last.
     n_before = len(bactrap_matched)
+    _sort_cols, _sort_asc = [], []
+    if "padj" in bactrap_matched.columns:
+        _sort_cols.append("padj")
+        _sort_asc.append(True)          # smaller padj first; NaN goes last
+    if "log2FoldChange" in bactrap_matched.columns:
+        bactrap_matched["_abs_l2fc"] = bactrap_matched["log2FoldChange"].abs()
+        _sort_cols.append("_abs_l2fc")
+        _sort_asc.append(False)         # larger |log2FC| first
+    if _sort_cols:
+        bactrap_matched = bactrap_matched.sort_values(
+            _sort_cols, ascending=_sort_asc, na_position="last", kind="mergesort",
+        )
     bactrap_matched = bactrap_matched.drop_duplicates(subset="_hypomap_gene_name", keep="first")
+    if "_abs_l2fc" in bactrap_matched.columns:
+        bactrap_matched = bactrap_matched.drop(columns="_abs_l2fc")
     bactrap_matched = bactrap_matched.reset_index(drop=True)
     matched_gene_names = bactrap_matched["_hypomap_gene_name"].tolist()
     gene_to_adata_idx = {g: gene_to_adata_idx[g] for g in matched_gene_names}
     if n_before != len(bactrap_matched):
-        logger.info("  deduplicated %d → %d genes (removed %d duplicate HypoMap mappings)",
+        logger.info("  deduplicated %d → %d genes (removed %d duplicate HypoMap mappings; "
+                     "kept row with smallest padj / largest |log2FC|)",
                      n_before, len(bactrap_matched), n_before - len(bactrap_matched))
 
     return bactrap_matched, matched_gene_names, gene_to_adata_idx, has_raw

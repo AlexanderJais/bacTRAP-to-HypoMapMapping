@@ -101,6 +101,17 @@ umap_subsample = st.sidebar.slider(
     "UMAP subsample (cells)", 10000, 200000, 50000, 5000,
     help="Subsample cells for UMAP visualization to reduce rendering time.",
 )
+hide_unassigned = st.sidebar.checkbox(
+    "Hide Unassigned / Mixed clusters in rankings",
+    value=False,
+    help=(
+        "Filter clusters whose label contains 'Unassigned' or 'Mixed' from "
+        "ranking tables and selection lists.  Useful because HypoMap's "
+        "uncurated mixed clusters can artificially top GSEA and other "
+        "rankings due to heterogeneous membership.  Underlying computations "
+        "still include all clusters; only the displayed rankings are filtered."
+    ),
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Figure Settings")
@@ -592,6 +603,38 @@ if run_button or st.session_state.analysis_done:
         progress_placeholder.empty()
 
     st.session_state.analysis_done = True
+
+    # ---- Optional display-time filter for Unassigned / Mixed clusters ----
+    # HypoMap's "Unassigned" and "Mixed" clusters are uncurated aggregates
+    # that can artificially top rankings (especially GSEA) because of
+    # heterogeneous membership.  Filtering is applied after the analysis
+    # cache so toggling the checkbox doesn't invalidate computations; it
+    # only changes what the tabs display.
+    if hide_unassigned:
+        import re as _re
+        _excl_pat = _re.compile(r"Unassigned|Mixed", _re.IGNORECASE)
+
+        def _filter_by_cluster(df, col="cluster"):
+            if df is None or len(df) == 0 or col not in df.columns:
+                return df
+            mask = ~df[col].astype(str).str.contains(_excl_pat, na=False)
+            return df[mask].reset_index(drop=True)
+
+        corr_df = _filter_by_cluster(corr_df)
+        fisher_df = _filter_by_cluster(fisher_df)
+        nnls_df = _filter_by_cluster(nnls_df)
+        gsea_df = _filter_by_cluster(gsea_df)
+        composite_df = _filter_by_cluster(composite_df)
+
+        # Recompute selection lists that drive dotplot / heatmap cluster sets
+        # so they stay consistent with the filtered rankings.
+        if len(corr_df) > 0 and "both_significant" in corr_df.columns:
+            _sig = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
+            top_clusters_corr = _sig[:15] if len(_sig) >= 5 else corr_df["cluster"].tolist()[:15]
+            top_clusters_heatmap = _sig[:20] if len(_sig) >= 5 else corr_df["cluster"].tolist()[:20]
+        else:
+            top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
+            top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
 
     # Cache figure bytes so the Export tab doesn't regenerate them.
     # Only reset when a new analysis run is triggered (run_button pressed

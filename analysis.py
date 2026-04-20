@@ -762,8 +762,18 @@ def compute_gsea_enrichment(
         else:
             pval = (np.sum(null_es <= es) + 1) / (n_perm + 1)
 
-        null_mean = np.mean(np.abs(null_es))
-        nes = es / null_mean if null_mean > 0 else 0.0
+        # Sign-split NES normalization (Subramanian et al., PNAS 2005):
+        # positive and negative enrichment scores live on asymmetric null
+        # distributions, so each ES is normalized by the mean of null ESs
+        # with the same sign.  Normalizing by mean(|null|) mixes the two
+        # and can inflate |NES| when the null is dominated by one sign.
+        if es >= 0:
+            pos_null = null_es[null_es > 0]
+            norm = float(pos_null.mean()) if pos_null.size else 0.0
+        else:
+            neg_null = null_es[null_es < 0]
+            norm = float(-neg_null.mean()) if neg_null.size else 0.0
+        nes = es / norm if norm > 0 else 0.0
 
         results.append({
             "cluster": cluster,
