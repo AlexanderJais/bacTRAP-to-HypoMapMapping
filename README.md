@@ -70,6 +70,8 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 | bacTRAP gene column | Column containing gene identifiers | Auto-detected (highest match rate) |
 | padj cutoff | Adjusted p-value threshold for enriched genes | 0.05 |
 | log2FC cutoff | Minimum log2 fold change for enriched genes | 1.0 |
+| Min IP expression | Minimum mean IP count (DESeq2 baseMean) — suppresses log₂FC inflation for genes with near-zero Input | 10 |
+| Gene ranking metric | How top-N genes are chosen: π-score (default), log₂FoldChange, or -log₁₀(padj) | π-score |
 | Top N genes | Number of top enriched genes for scoring | 50 |
 | Markers per cluster | Number of marker genes per cluster for overlap test | 100 |
 | Min cells per cluster | Minimum cells required to include a cluster | 10 |

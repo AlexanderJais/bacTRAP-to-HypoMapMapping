@@ -75,6 +75,37 @@ padj_cutoff = st.sidebar.slider(
 log2fc_cutoff = st.sidebar.slider(
     "log₂FC cutoff", 0.0, 5.0, 1.0, 0.25,
 )
+min_ip_expression = st.sidebar.slider(
+    "Min IP expression (baseMean)", 0.0, 200.0, 10.0, 5.0,
+    help=(
+        "Minimum mean IP expression (DESeq2 baseMean-style, from the 'IP' "
+        "column) required for a gene to pass the enrichment filter. "
+        "DESeq2 inflates log₂FC for low-count genes with near-zero Input "
+        "(e.g. 28 IP reads vs 0 Input → log₂FC≈7), so the default ranking "
+        "otherwise pulls these artefacts above real Cre-driver signal. "
+        "Set to 0 to disable. A typical value of 10 removes zero-Input "
+        "low-count noise without dropping genuinely cell-type-specific genes."
+    ),
+)
+ranking_metric_label = st.sidebar.selectbox(
+    "Gene ranking metric",
+    ["π-score (|log₂FC| × -log₁₀padj)", "log₂FoldChange", "-log₁₀(padj)"],
+    index=0,
+    help=(
+        "How the app picks the top-N genes for AUCell, dot-plot, and "
+        "heat-map. π-score (Xiao et al. 2014) balances effect size with "
+        "significance so a strongly significant moderate-FC gene (e.g. "
+        "Pnoc, FC=2, padj=1e-17) outranks a low-count pseudocount artefact "
+        "(FC=7, padj=1e-4). Choose 'log₂FoldChange' for the historical "
+        "behaviour."
+    ),
+)
+_ranking_metric_map = {
+    "π-score (|log₂FC| × -log₁₀padj)": "pi_score",
+    "log₂FoldChange": "log2fc",
+    "-log₁₀(padj)": "padj",
+}
+ranking_metric = _ranking_metric_map[ranking_metric_label]
 top_n_genes = st.sidebar.slider(
     "Top N genes for scoring", 10, 500, 50, 10,
 )
@@ -213,6 +244,7 @@ from data_loading import (
 from analysis import (
     compute_enrichment_correlation,
     get_enriched_genes,
+    rank_enriched_genes,
     compute_marker_genes,
     load_precomputed_markers,
     fisher_overlap_test,
@@ -362,7 +394,8 @@ tab1, tab_aucell, tab_sanity, tab3, tab4, tab5, tab6, tab7, tab8, tab_export = s
 _analysis_params = (
     bactrap_file.strip(), hypomap_file.strip(),
     _gene_col_for_matching, annotation_col,
-    padj_cutoff, log2fc_cutoff, top_n_genes,
+    padj_cutoff, log2fc_cutoff, min_ip_expression, ranking_metric,
+    top_n_genes,
     n_markers_per_cluster, min_cells_per_cluster, marker_method,
     umap_subsample,
 )
@@ -406,11 +439,19 @@ if run_button or st.session_state.analysis_done:
         progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
 
         # ---- Enriched genes ----
-        enriched_df = get_enriched_genes(bactrap_matched, padj_cutoff, log2fc_cutoff)
+        # Pass the min-IP-expression filter through; it guards against the
+        # DESeq2 low-count log₂FC-inflation artefact (see rank_enriched_genes
+        # docstring for details).
+        enriched_df = get_enriched_genes(
+            bactrap_matched, padj_cutoff, log2fc_cutoff,
+            min_ip_expression=min_ip_expression, ip_col="IP",
+        )
         enriched_genes_list = enriched_df["_hypomap_gene_name"].tolist()
 
-        # Top N enriched genes ranked by both significance and effect size
-        enriched_sorted = enriched_df.sort_values("log2FoldChange", ascending=False).reset_index(drop=True)
+        # Rank enriched genes by the user-chosen metric (default π-score,
+        # which balances effect size with statistical significance so
+        # low-count / zero-Input pseudocount artefacts don't dominate).
+        enriched_sorted = rank_enriched_genes(enriched_df, metric=ranking_metric)
         top_enriched_genes = enriched_sorted["_hypomap_gene_name"].tolist()[:top_n_genes]
 
         progress.progress(30, text="Computing enrichment correlation...")
@@ -738,6 +779,11 @@ if run_button or st.session_state.analysis_done:
         st.dataframe(bactrap_df.head(20), use_container_width=True)
 
         st.subheader("Top Enriched Genes")
+        st.caption(
+            f"Filters: padj < {padj_cutoff:.3g}, log₂FC > {log2fc_cutoff:.2f}, "
+            f"IP ≥ {min_ip_expression:.0f}. "
+            f"Ranked by **{ranking_metric_label}**."
+        )
         if len(enriched_df) > 0:
             display_cols = ["_hypomap_gene_name", "log2FoldChange", "padj", "IP", "Input"]
             available_cols = [c for c in display_cols if c in enriched_df.columns]

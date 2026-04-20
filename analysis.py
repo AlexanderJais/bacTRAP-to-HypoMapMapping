@@ -169,11 +169,22 @@ def get_enriched_genes(
     bactrap_df: pd.DataFrame,
     padj_cutoff: float = 0.05,
     log2fc_cutoff: float = 1.0,
+    min_ip_expression: float = 0.0,
+    ip_col: str = "IP",
 ) -> pd.DataFrame:
     """
     Filter bacTRAP data for significantly enriched genes.
 
-    Returns subset of bactrap_df passing both padj and log2FC thresholds.
+    Returns subset of bactrap_df passing padj, log2FC, and (optionally)
+    minimum IP expression thresholds.
+
+    The *min_ip_expression* filter suppresses the DESeq2 low-count
+    artefact in which a gene with near-zero Input counts gets an
+    inflated log₂FC from pseudocount division (e.g. 28 IP reads vs
+    0 Input → log₂FC ~7).  These genes would dominate any
+    log₂FC-ranked top-N list despite being statistically weak.  When
+    ``ip_col`` is not present in the DataFrame the filter is skipped
+    with a warning.
     """
     for required_col in ("padj", "log2FoldChange"):
         if required_col not in bactrap_df.columns:
@@ -190,11 +201,91 @@ def get_enriched_genes(
         & (bactrap_df["padj"] < padj_cutoff)
         & (bactrap_df["log2FoldChange"] > log2fc_cutoff)
     )
+    ip_filter_applied = False
+    if min_ip_expression > 0.0:
+        if ip_col in bactrap_df.columns:
+            ip_values = pd.to_numeric(bactrap_df[ip_col], errors="coerce")
+            ip_mask = ip_values.fillna(0) >= min_ip_expression
+            n_before_ip = mask.sum()
+            mask = mask & ip_mask
+            ip_filter_applied = True
+            logger.info(
+                "get_enriched_genes: IP filter '%s' >= %.3g removed %d/%d genes "
+                "(%d → %d after filter)",
+                ip_col, min_ip_expression,
+                n_before_ip - mask.sum(), n_before_ip,
+                n_before_ip, mask.sum(),
+            )
+        else:
+            logger.warning(
+                "get_enriched_genes: min_ip_expression=%.3g requested but "
+                "column '%s' not in bacTRAP data — filter SKIPPED. "
+                "Available columns: %s",
+                min_ip_expression, ip_col, list(bactrap_df.columns),
+            )
     n_enriched = mask.sum()
     logger.info("get_enriched_genes: %d total, %d with padj, %d pass padj<%.3f, "
-                "%d pass log2FC>%.2f, %d pass both",
-                n_total, has_padj, passes_padj, padj_cutoff, passes_fc, log2fc_cutoff, n_enriched)
+                "%d pass log2FC>%.2f, %d pass both%s",
+                n_total, has_padj, passes_padj, padj_cutoff, passes_fc, log2fc_cutoff, n_enriched,
+                f" (after min_IP>={min_ip_expression:.3g} filter)" if ip_filter_applied else "")
     return bactrap_df[mask].copy()
+
+
+def rank_enriched_genes(
+    df: pd.DataFrame,
+    metric: str = "pi_score",
+) -> pd.DataFrame:
+    """
+    Sort an enriched-gene DataFrame by the chosen ranking metric,
+    most-enriched first.
+
+    Metrics
+    -------
+    ``"pi_score"`` (recommended default)
+        ``|log₂FC| × -log₁₀(padj)`` — the π-score of Xiao et al.
+        (Bioinformatics 2014). Combines effect size and significance so
+        a gene with a modest but highly significant fold-change (e.g.
+        Pnoc in a Pnoc-Cre line: FC=2, padj=1e-17) outranks a low-count
+        zero-Input artefact (e.g. FC=7, padj=1e-4).
+    ``"log2fc"``
+        Raw ``log₂FoldChange``. Historical default; vulnerable to
+        low-count inflation.
+    ``"padj"``
+        ``-log₁₀(padj)``. Ranks by statistical significance only; ignores
+        effect size.
+
+    Ties are broken by padj (ascending) then by log₂FC (descending).
+    """
+    if len(df) == 0:
+        return df.copy()
+    df = df.copy()
+    eps = 1e-300  # avoid log10(0) for genes with padj==0
+
+    if metric == "pi_score":
+        score = np.abs(df["log2FoldChange"]) * -np.log10(df["padj"].clip(lower=eps))
+    elif metric == "log2fc":
+        score = df["log2FoldChange"].astype(float)
+    elif metric == "padj":
+        score = -np.log10(df["padj"].clip(lower=eps))
+    else:
+        raise ValueError(
+            f"Unknown ranking metric '{metric}'. "
+            f"Valid options: 'pi_score', 'log2fc', 'padj'."
+        )
+
+    df = df.assign(_rank_score=score)
+    df = df.sort_values(
+        ["_rank_score", "padj", "log2FoldChange"],
+        ascending=[False, True, False],
+        kind="mergesort",
+    ).drop(columns="_rank_score").reset_index(drop=True)
+    logger.info(
+        "rank_enriched_genes: metric='%s', %d genes ranked. "
+        "Top 3: %s",
+        metric, len(df),
+        df["_hypomap_gene_name"].head(3).tolist() if "_hypomap_gene_name" in df.columns else df.head(3).index.tolist(),
+    )
+    return df
 
 
 def compute_marker_genes(
