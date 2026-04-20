@@ -198,15 +198,26 @@ def get_enriched_genes(
 
 
 def compute_marker_genes(
-    adata, annotation_col: str, n_genes: int = 100, min_cells: int = 10
+    adata,
+    annotation_col: str,
+    n_genes: int = 100,
+    min_cells: int = 10,
+    method: str = "wilcoxon",
 ) -> Dict[str, List[str]]:
     """
     Compute marker genes per cluster using scanpy's rank_genes_groups.
 
+    The ``method`` argument is forwarded to ``sc.tl.rank_genes_groups``.
+    ``"wilcoxon"`` is the default (robust, non-parametric) but scales
+    poorly on very large atlases — on HypoMap (~385K cells × 185
+    clusters) it takes ~15 minutes.  ``"t-test_overestim_var"`` produces
+    a comparable ranking in a fraction of the time and is suitable when
+    rankings — not exact p-values — are what downstream steps consume.
+
     Returns dict mapping cluster name to list of marker gene names.
     """
-    logger.info("compute_marker_genes: annotation_col=%s, n_genes=%d, min_cells=%d",
-                annotation_col, n_genes, min_cells)
+    logger.info("compute_marker_genes: annotation_col=%s, n_genes=%d, min_cells=%d, method=%s",
+                annotation_col, n_genes, min_cells, method)
     # Filter to clusters with enough cells
     cluster_counts = adata.obs[annotation_col].value_counts()
     valid_clusters = cluster_counts[cluster_counts >= min_cells].index.tolist()
@@ -251,7 +262,7 @@ def compute_marker_genes(
     sc.tl.rank_genes_groups(
         adata_work,
         groupby=annotation_col,
-        method="wilcoxon",
+        method=method,
         n_genes=n_genes,
         use_raw=False,
     )

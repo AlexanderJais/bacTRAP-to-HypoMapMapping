@@ -84,6 +84,19 @@ n_markers_per_cluster = st.sidebar.slider(
 min_cells_per_cluster = st.sidebar.slider(
     "Min cells per cluster", 1, 100, 10, 1,
 )
+_marker_method_label = st.sidebar.selectbox(
+    "Marker test",
+    ["Wilcoxon (robust, slower)", "t-test overestim_var (faster)"],
+    index=0,
+    help=(
+        "Wilcoxon is non-parametric and recommended for publication-grade "
+        "p-values, but takes ~15 min on HypoMap-scale data. t-test "
+        "overestim_var produces a comparable ranking in a fraction of the "
+        "time — fine when downstream steps use the ranking, not the "
+        "nominal p-values."
+    ),
+)
+marker_method = "wilcoxon" if _marker_method_label.startswith("Wilcoxon") else "t-test_overestim_var"
 umap_subsample = st.sidebar.slider(
     "UMAP subsample (cells)", 10000, 200000, 50000, 5000,
     help="Subsample cells for UMAP visualization to reduce rendering time.",
@@ -312,7 +325,7 @@ _analysis_params = (
     bactrap_file.strip(), hypomap_file.strip(),
     _gene_col_for_matching, annotation_col,
     padj_cutoff, log2fc_cutoff, top_n_genes,
-    n_markers_per_cluster, min_cells_per_cluster,
+    n_markers_per_cluster, min_cells_per_cluster, marker_method,
     umap_subsample,
 )
 
@@ -371,22 +384,39 @@ if run_button or st.session_state.analysis_done:
         progress.progress(30, text="Computing marker gene overlap...")
 
         # ---- Marker gene overlap ----
-        # Try pre-computed markers first, but only if they match the selected
-        # annotation column (pre-computed markers may be for a different level).
-        markers = load_precomputed_markers(adata)
-        if markers is not None:
-            current_clusters = set(adata.obs[annotation_col].unique().astype(str))
-            marker_clusters = set(markers.keys())
-            overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
-            if overlap_ratio < 0.5:
-                markers = None  # mismatch — recompute for the selected annotation
-        if markers is None:
-            with st.spinner("Computing marker genes (this may take several minutes)..."):
-                markers = compute_marker_genes(
-                    adata, annotation_col,
-                    n_genes=n_markers_per_cluster,
-                    min_cells=min_cells_per_cluster,
-                )
+        # Markers only depend on the atlas file, annotation column, n_genes,
+        # min_cells, and the chosen test — NOT on padj/log2FC/top_n/umap
+        # subsample.  They're cached separately from the full analysis
+        # fingerprint so twiddling an unrelated slider doesn't trigger the
+        # ~15-min Wilcoxon recompute.  Pre-computed markers from adata.uns
+        # are reused when the cluster labels match the selected annotation.
+        _markers_params = (
+            hypomap_file.strip(), annotation_col,
+            n_markers_per_cluster, min_cells_per_cluster, marker_method,
+        )
+        _markers_cached = st.session_state.get("_markers_cache")
+        if _markers_cached is not None and _markers_cached.get("params") == _markers_params:
+            markers = _markers_cached["markers"]
+            logger.info("reusing cached markers (params unchanged)")
+        else:
+            markers = load_precomputed_markers(adata)
+            if markers is not None:
+                current_clusters = set(adata.obs[annotation_col].unique().astype(str))
+                marker_clusters = set(markers.keys())
+                overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
+                if overlap_ratio < 0.5:
+                    markers = None  # mismatch — recompute for the selected annotation
+            if markers is None:
+                with st.spinner("Computing marker genes (this may take several minutes)..."):
+                    markers = compute_marker_genes(
+                        adata, annotation_col,
+                        n_genes=n_markers_per_cluster,
+                        min_cells=min_cells_per_cluster,
+                        method=marker_method,
+                    )
+            st.session_state["_markers_cache"] = {
+                "params": _markers_params, "markers": markers,
+            }
         progress.progress(45, text="Running Fisher's exact test...")
 
         universe_size = len(matched_genes)
