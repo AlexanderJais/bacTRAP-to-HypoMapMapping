@@ -263,6 +263,8 @@ from analysis import (
     compute_nnls_deconvolution,
     compute_gsea_enrichment,
     compute_aucell_scores,
+    validate_aucell_input,
+    compute_cluster_enrichment_stats,
     compute_composite_ranking,
 )
 from figures import (
@@ -582,12 +584,20 @@ if run_button or st.session_state.analysis_done:
             gsea_running_scores = {}
             gsea_ranked_genes = np.array([])
 
+        progress.progress(78, text="Validating AUCell input layer...")
+
+        # ---- AUCell input-layer validation (fix #2: guard against
+        # non-raw-count layers silently being fed into AUCell) ----
+        aucell_qc = validate_aucell_input(adata, use_raw=True)
+
         progress.progress(80, text="Computing AUCell scores...")
 
         # ---- AUCell scoring ----
         aucell_scores = compute_aucell_scores(
             adata, top_enriched_genes, top_fraction=aucell_top_fraction,
         )
+
+        progress.progress(83, text="Computing per-cluster enrichment significance...")
 
         # ---- AUCell result tables (raw data underlying figures 1a–1d) ----
         _cell_labels_arr = adata.obs[annotation_col].values.astype(str)
@@ -596,6 +606,17 @@ if run_button or st.session_state.analysis_done:
             "cluster": _cell_labels_arr,
             "aucell_score": aucell_scores,
         })
+
+        # Per-cluster significance (fix #3: Welch's one-sided t-test
+        # cluster-vs-rest with BH-FDR so users can separate "truly enriched"
+        # from "small cluster with a slightly above-average mean")
+        aucell_cluster_stats_df = compute_cluster_enrichment_stats(
+            aucell_scores, _cell_labels_arr, min_cells=10, alpha=0.05,
+        )
+
+        # Preserve the original ordering (sorted by mean descending) for the
+        # figures, but merge in the significance columns so the downloadable
+        # table is the authoritative reference.
         _grp = aucell_per_cell_df.groupby("cluster")["aucell_score"]
         aucell_per_cluster_df = pd.DataFrame({
             "n_cells": _grp.count(),
@@ -610,6 +631,13 @@ if run_button or st.session_state.analysis_done:
             aucell_per_cluster_df.sort_values("mean", ascending=False)
             .reset_index()
         )
+        if not aucell_cluster_stats_df.empty:
+            aucell_per_cluster_df = aucell_per_cluster_df.merge(
+                aucell_cluster_stats_df[
+                    ["cluster", "t_stat", "pvalue", "qvalue", "significant"]
+                ],
+                on="cluster", how="left",
+            )
 
         progress.progress(85, text="Computing composite ranking...")
 
@@ -660,8 +688,10 @@ if run_button or st.session_state.analysis_done:
             "gsea_running_scores": gsea_running_scores,
             "gsea_ranked_genes": gsea_ranked_genes,
             "aucell_scores": aucell_scores,
+            "aucell_qc": aucell_qc,
             "aucell_per_cell_df": aucell_per_cell_df,
             "aucell_per_cluster_df": aucell_per_cluster_df,
+            "aucell_cluster_stats_df": aucell_cluster_stats_df,
             "composite_df": composite_df,
             "sub_indices": sub_indices,
             "umap_coords": umap_coords,
@@ -695,8 +725,10 @@ if run_button or st.session_state.analysis_done:
         gsea_running_scores = _c["gsea_running_scores"]
         gsea_ranked_genes = _c["gsea_ranked_genes"]
         aucell_scores = _c["aucell_scores"]
+        aucell_qc = _c.get("aucell_qc", {"warnings": [], "info": []})
         aucell_per_cell_df = _c["aucell_per_cell_df"]
         aucell_per_cluster_df = _c["aucell_per_cluster_df"]
+        aucell_cluster_stats_df = _c.get("aucell_cluster_stats_df", pd.DataFrame())
         composite_df = _c["composite_df"]
         sub_indices = _c["sub_indices"]
         umap_coords = _c["umap_coords"]
@@ -884,6 +916,32 @@ if run_button or st.session_state.analysis_done:
             f"Scores computed from the top **{len(top_enriched_genes)}** enriched genes."
         )
 
+        # Input-layer QC (fix #2) — warn loudly when the layer fed into
+        # AUCell does not look like raw counts.
+        _qc_warnings = aucell_qc.get("warnings", []) if aucell_qc else []
+        if _qc_warnings:
+            for _w in _qc_warnings:
+                st.warning(_w)
+        else:
+            _info = aucell_qc.get("info", []) if aucell_qc else []
+            if _info:
+                with st.expander("AUCell input QC", expanded=False):
+                    for _line in _info:
+                        st.caption(_line)
+
+        # Per-cluster significance summary (fix #3)
+        if aucell_cluster_stats_df is not None and not aucell_cluster_stats_df.empty:
+            _n_tested = len(aucell_cluster_stats_df)
+            _n_sig = int(aucell_cluster_stats_df["significant"].sum())
+            st.markdown(
+                f"**Enrichment significance (Welch's t, BH-FDR):** "
+                f"{_n_sig} / {_n_tested} clusters pass **q < 0.05** "
+                f"(cluster AUCell distribution vs. rest of atlas). "
+                f"Full per-cluster statistics — `t_stat`, `pvalue`, `qvalue`, "
+                f"`significant` — are appended to the downloadable "
+                f"`aucell_per_cluster.csv`."
+            )
+
         # Figure 1a: AUCell UMAP
         st.subheader("Figure 1a: AUCell Enrichment UMAP")
         fig_1a = figure_aucell_umap(
@@ -1001,7 +1059,11 @@ if run_button or st.session_state.analysis_done:
                 st.session_state.table_bytes["aucell_per_cluster"],
                 "aucell_per_cluster.csv", "text/csv",
                 key="dl_fig_1b_csv",
-                help="cluster, n_cells, mean, median, std, sem — sorted by mean descending.",
+                help=(
+                    "cluster, n_cells, mean, median, std, sem, t_stat, pvalue, "
+                    "qvalue, significant — sorted by mean descending. Significance "
+                    "is Welch's one-sided t (cluster > rest) with BH-FDR."
+                ),
             )
         plt.close(fig_1b)
 
@@ -1044,8 +1106,10 @@ if run_button or st.session_state.analysis_done:
                 key="dl_fig_1c_mean_csv",
                 help=(
                     "Plotted quantities: cluster, n_cells, mean (black bar), "
-                    "median (grey dashed bar), std, sem. Sorted by mean descending — "
-                    "the top 15 rows are the clusters shown in the violin."
+                    "median (grey dashed bar), std, sem, plus Welch's t-test "
+                    "significance columns (t_stat, pvalue, qvalue, significant). "
+                    "Sorted by mean descending — the top 15 rows are the "
+                    "clusters shown in the violin."
                 ),
             )
         with col_cell:
@@ -1836,7 +1900,10 @@ if run_button or st.session_state.analysis_done:
                     aucell_table_bytes["aucell_per_cluster"],
                     "aucell_per_cluster.csv", "text/csv",
                     key="dl_aucell_per_cluster_export",
-                    help="cluster, n_cells, mean, median, std, sem — raw data for figure 1b.",
+                    help=(
+                        "cluster, n_cells, mean, median, std, sem, t_stat, pvalue, "
+                        "qvalue, significant — raw data for figure 1b."
+                    ),
                 )
 
         st.markdown("---")

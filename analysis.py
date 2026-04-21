@@ -996,6 +996,194 @@ def compute_aucell_scores(
     return scores
 
 
+def validate_aucell_input(adata, use_raw: bool = True, sample_size: int = 500) -> Dict:
+    """Sanity-check the expression layer that will be fed into AUCell.
+
+    AUCell is defined on gene-expression *ranks* per cell; the paper (Aibar
+    et al. 2017) and the reference implementations build rankings from raw
+    UMI counts. Feeding in pre-log-normalised data is not strictly wrong —
+    the rank order of *distinct* values is preserved by any monotonic
+    transform — but ties collapse very differently (most log-normalised
+    matrices lose the fine-grained tie structure of low counts), so scores
+    and their interpretation shift. This function inspects a random sample
+    of the chosen layer and returns a machine-readable QC report that the
+    caller can surface to the user.
+
+    Returns:
+        dict with keys
+            layer: "raw" or "X"
+            n_cells, n_genes, n_cells_sampled
+            max_value, min_nonzero
+            is_integer: bool — all sampled values are integers
+            looks_like_counts: bool — is_integer AND max_value > 50
+            warnings: list[str] — user-facing strings (empty when clean)
+            info: list[str] — informational lines
+    """
+    report: Dict = {
+        "layer": "raw" if (use_raw and adata.raw is not None) else "X",
+        "n_cells": int(adata.n_obs),
+        "n_genes": int(adata.n_vars),
+        "n_cells_sampled": 0,
+        "max_value": 0.0,
+        "min_nonzero": float("nan"),
+        "is_integer": False,
+        "looks_like_counts": False,
+        "warnings": [],
+        "info": [],
+    }
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+        report["n_genes"] = int(adata.raw.n_vars)
+    else:
+        X = adata.X
+        if use_raw and adata.raw is None:
+            report["warnings"].append(
+                "use_raw=True was requested but adata.raw is None; falling "
+                "back to adata.X. If adata.X is log-normalised, AUCell tie "
+                "structure will differ from the canonical raw-count version."
+            )
+
+    n_cells = X.shape[0]
+    sample_n = min(sample_size, n_cells)
+    if n_cells > sample_n:
+        rng = np.random.default_rng(42)
+        pick = rng.choice(n_cells, sample_n, replace=False)
+        sample = X[pick, :]
+    else:
+        sample = X
+    if sparse.issparse(sample):
+        sample = np.asarray(sample.toarray())
+    else:
+        sample = np.asarray(sample)
+    report["n_cells_sampled"] = int(sample.shape[0])
+
+    if sample.size == 0:
+        report["warnings"].append("Selected layer is empty.")
+        return report
+
+    sample_max = float(sample.max())
+    nonzero = sample[sample > 0]
+    sample_min_nz = float(nonzero.min()) if nonzero.size > 0 else float("nan")
+    is_int = bool(np.all(sample == np.round(sample)))
+    looks_like_counts = is_int and sample_max > 50
+
+    report["max_value"] = sample_max
+    report["min_nonzero"] = sample_min_nz
+    report["is_integer"] = is_int
+    report["looks_like_counts"] = looks_like_counts
+    report["info"].append(
+        f"AUCell input layer: {report['layer']} ({sample.shape[0]} cells x "
+        f"{sample.shape[1]} genes sampled, max={sample_max:.2f}, "
+        f"min_nonzero={sample_min_nz:.3g}, integer={is_int})"
+    )
+
+    if not looks_like_counts:
+        if is_int and sample_max <= 50:
+            report["warnings"].append(
+                f"AUCell input has integer values but max = {sample_max:.0f} "
+                f"(<= 50) — unusually low for raw UMI counts. Verify that "
+                f"adata.raw contains counts and not e.g. a binarised layer."
+            )
+        else:
+            report["warnings"].append(
+                f"AUCell input does NOT look like raw integer counts "
+                f"(max={sample_max:.2f}, integer={is_int}). AUCell "
+                f"(Aibar et al. 2017) is defined on raw counts; log-"
+                f"normalised or scaled input will preserve distinct-value "
+                f"rank order but collapses tie structure differently. "
+                f"Consider pointing adata.raw at a raw-count layer before "
+                f"scoring — compute_aucell_scores will still run and will "
+                f"scale its tie-breaking jitter accordingly."
+            )
+
+    logger.info("validate_aucell_input: layer=%s, looks_like_counts=%s, "
+                "max=%.2f, integer=%s, n_warnings=%d",
+                report["layer"], looks_like_counts, sample_max, is_int,
+                len(report["warnings"]))
+    return report
+
+
+def compute_cluster_enrichment_stats(
+    aucell_scores: np.ndarray,
+    cell_labels: np.ndarray,
+    min_cells: int = 10,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """Per-cluster enrichment significance from AUCell scores.
+
+    For each cluster we test the one-sided null that its AUCell scores are
+    drawn from the same distribution as the rest of the atlas, using
+    Welch's t-test (unequal variance). Multiple testing across clusters is
+    corrected with Benjamini-Hochberg to give a per-cluster q-value.
+
+    This fills the gap the previous pipeline had: ranking clusters by mean
+    AUCell alone cannot distinguish "strongly enriched" from "a small
+    cluster that happens to have a slightly above-average mean" — the
+    q-value addresses exactly that. Clusters with fewer than *min_cells*
+    cells are dropped (Welch's t breaks down at very small n).
+
+    Returns a DataFrame (sorted by qvalue, ascending) with columns:
+        cluster, n_cells, mean, sem, std, t_stat, pvalue, qvalue, significant
+    """
+    scores = np.asarray(aucell_scores, dtype=np.float64)
+    labels = np.asarray(cell_labels)
+    if scores.shape[0] != labels.shape[0]:
+        raise ValueError(
+            f"aucell_scores ({scores.shape[0]}) and cell_labels "
+            f"({labels.shape[0]}) length mismatch"
+        )
+
+    unique_labels = pd.unique(labels)
+    rows = []
+    for cl in unique_labels:
+        mask = labels == cl
+        n = int(mask.sum())
+        if n < min_cells:
+            continue
+        in_scores = scores[mask]
+        out_scores = scores[~mask]
+        if in_scores.size < 2 or out_scores.size < 2:
+            continue
+        # Welch's one-sided t-test: cluster > rest
+        t_stat, p_two = stats.ttest_ind(
+            in_scores, out_scores, equal_var=False, nan_policy="omit",
+        )
+        # scipy's ttest_ind returns two-sided; convert to one-sided upper tail
+        if np.isnan(t_stat):
+            continue
+        p_one = (p_two / 2.0) if t_stat > 0 else (1.0 - p_two / 2.0)
+        rows.append({
+            "cluster": str(cl),
+            "n_cells": n,
+            "mean": float(in_scores.mean()),
+            "std": float(in_scores.std(ddof=1)),
+            "sem": float(in_scores.std(ddof=1) / np.sqrt(n)),
+            "t_stat": float(t_stat),
+            "pvalue": float(p_one),
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        logger.warning("compute_cluster_enrichment_stats: no clusters passed "
+                       "the min_cells=%d filter", min_cells)
+        df["qvalue"] = []
+        df["significant"] = []
+        return df
+
+    from statsmodels.stats.multitest import multipletests
+    _, qvals, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
+    df["qvalue"] = qvals
+    df["significant"] = df["qvalue"] < alpha
+
+    df = df.sort_values(["qvalue", "pvalue"], ascending=True).reset_index(drop=True)
+
+    n_sig = int(df["significant"].sum())
+    logger.info("compute_cluster_enrichment_stats: %d/%d clusters tested, "
+                "%d significant at BH-FDR q < %.3f",
+                len(df), len(unique_labels), n_sig, alpha)
+    return df
+
+
 # =========================================================================
 # Composite Ranking
 # =========================================================================
