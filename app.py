@@ -130,7 +130,8 @@ min_cells_for_rank = st.sidebar.slider(
     "Min cells for AUCell top-N ranking", 1, 200, 20, 1,
     help=(
         "Clusters with fewer than this many cells are excluded from the "
-        "top-ranked set shown in figures 1a(ii)/1b/1c. Mean AUCell for "
+        "top-ranked set shown in main figures 1b/1c and supplementary S2. "
+        "Mean AUCell for "
         "very small clusters is dominated by shrinkage variance, so a "
         "2-cell cluster with a slightly above-average mean can otherwise "
         "claim a top slot purely by chance (fix #4 from the critical "
@@ -642,7 +643,7 @@ if run_button or st.session_state.analysis_done:
 
         progress.progress(83, text="Computing per-cluster enrichment significance...")
 
-        # ---- AUCell result tables (raw data underlying figures 1a–1d) ----
+        # ---- AUCell result tables (raw data underlying figures 1a–1c + S2/S3) ----
         _cell_labels_arr = adata.obs[annotation_col].values.astype(str)
         aucell_per_cell_df = pd.DataFrame({
             "cell_id": adata.obs_names.astype(str),
@@ -987,6 +988,21 @@ if run_button or st.session_state.analysis_done:
 
         # Figure 1a: AUCell UMAP
         st.subheader("Figure 1a: AUCell Enrichment UMAP")
+        st.markdown(
+            f"**Figure 1a.** AUCell enrichment score for the bacTRAP signature "
+            f"projected onto the HypoMap UMAP embedding "
+            f"(n = {adata.n_obs:,} cells). For each cell, the area under the "
+            f"recovery curve for the top "
+            f"**{len(top_enriched_genes)}** π-score-ranked bacTRAP-enriched "
+            f"genes was computed within the top "
+            f"**{aucell_top_fraction:.0%}** of genes by expression rank in "
+            f"that cell and normalised to its theoretical maximum, so values "
+            f"lie on [0, 1]. Colour encodes AUCell score (magma colormap); "
+            f"the scale is clipped at the 2nd and 98th percentiles to "
+            f"suppress outlier saturation. Bottom-left arrows mark the "
+            f"UMAP1 / UMAP2 axes. See Methods (*AUCell scoring*) for the "
+            f"full derivation."
+        )
         fig_1a = figure_aucell_umap(
             umap_coords, aucell_scores,
             double_column=double_column,
@@ -1020,14 +1036,21 @@ if run_button or st.session_state.analysis_done:
             )
         plt.close(fig_1a)
 
-        # Figure 1a2: Cell-type annotation UMAP (top-15 AUCell clusters)
-        st.subheader("Figure 1a (ii): Cell-type Annotation UMAP")
+        # Figure 1b: Cell-type annotation UMAP (top-15 AUCell clusters)
+        st.subheader("Figure 1b: Cell-type Annotation UMAP (top-15 AUCell clusters)")
         st.markdown(
-            "Same UMAP layout as figure 1a, coloured by HypoMap cell-type "
-            "annotation. Only the **top-15** clusters by AUCell mean are "
-            "highlighted (matching figures 1b/1c); all other cells are "
-            "drawn in light grey so small but highly enriched populations "
-            "remain visible."
+            f"**Figure 1b.** Same UMAP layout as (a), coloured by HypoMap "
+            f"cell-type annotation (`{annotation_col}`). Only the 15 "
+            f"clusters with the highest mean AUCell score (among clusters "
+            f"with ≥ **{min_cells_for_rank}** cells) are drawn in colour "
+            f"and overplotted on a light-grey background of all remaining "
+            f"cells; this keeps small but highly enriched populations "
+            f"visible while conveying overall atlas topology. The legend "
+            f"lists the highlighted clusters in rank order (top entry = "
+            f"highest mean AUCell). The 20-cell floor excludes small "
+            f"populations whose cluster mean is dominated by shrinkage "
+            f"variance and would otherwise claim top slots by chance — "
+            f"they remain in `aucell_per_cluster.csv`."
         )
         _size_filtered_ranked = (
             aucell_per_cluster_df[
@@ -1073,12 +1096,21 @@ if run_button or st.session_state.analysis_done:
             )
         plt.close(fig_1a_ct)
 
-        # Figure 1b: AUCell Cluster Barplot
-        st.subheader("Figure 1b: AUCell Score per Cluster")
+        st.markdown("---")
+        st.caption(
+            "Panels below are supplementary to the main figure (1a–c); they "
+            "are published as supplementary figures in the Methods document."
+        )
+
+        # Supplementary S2: AUCell Cluster Barplot (was Figure 1b)
+        st.subheader("Supplementary Figure S2: Mean AUCell Score per Cluster")
         st.markdown(
-            "Mean AUCell score per cluster (error bars = SEM). "
-            "Clusters where cells consistently express the enriched gene set "
-            "rank highest."
+            f"**Supplementary Figure S2.** Horizontal barplot of mean AUCell "
+            f"score per HypoMap cluster (top 25 by mean, clusters with "
+            f"< **{min_cells_for_rank}** cells excluded from ranking). "
+            f"Error bars are standard error of the mean. Bar colour "
+            f"encodes the cluster mean (magma colormap). Source table: "
+            f"`aucell_per_cluster.csv`."
         )
         fig_1b = figure_aucell_cluster_barplot(
             aucell_scores, cell_labels,
@@ -1118,13 +1150,20 @@ if run_button or st.session_state.analysis_done:
         plt.close(fig_1b)
 
         # Figure 1c: AUCell Violin Plots
-        st.subheader("Figure 1c: AUCell Score Distributions (Top Clusters)")
+        st.subheader("Figure 1c: AUCell Score Distributions (Top-15 Clusters)")
         st.markdown(
-            "Violin plots showing the full distribution of AUCell scores within "
-            "each top-ranked cluster, ordered so the highest-mean cluster sits "
-            "at the top. The short **black** vertical bar inside each violin "
-            "marks the mean; the **grey dashed** bar marks the median (when "
-            "they overlap they look like a single I-shape — see the legend)."
+            f"**Figure 1c.** Violin plots of the full AUCell score "
+            f"distribution within each of the 15 top-ranked clusters from "
+            f"(b), ordered from highest (top) to lowest (bottom) cluster "
+            f"mean. The short **solid black** vertical bar inside each "
+            f"violin marks the cluster mean; the **dashed grey** bar marks "
+            f"the cluster median (the two nearly coincide when the "
+            f"distribution is symmetric, in which case they read as a "
+            f"single I-shape — see the on-figure legend). Violin fill "
+            f"colour encodes the cluster mean (magma colormap). "
+            f"Per-cluster means, medians, SEMs and Welch's one-sided "
+            f"*t*-test *p*/*q*-values against the rest of the atlas are "
+            f"available in `aucell_per_cluster.csv`."
         )
         fig_1c = figure_aucell_violins(
             aucell_scores, cell_labels,
@@ -1173,12 +1212,14 @@ if run_button or st.session_state.analysis_done:
             )
         plt.close(fig_1c)
 
-        # Figure 1d: AUCell Score Histogram
-        st.subheader("Figure 1d: AUCell Score Distribution (All Cells)")
+        # Supplementary S3: AUCell Score Histogram (was Figure 1d)
+        st.subheader("Supplementary Figure S3: Global AUCell Score Distribution")
         st.markdown(
-            "Global distribution of AUCell scores with percentile markers. "
-            "Cells above the 95th percentile are most likely part of the "
-            "bacTRAP target population."
+            "**Supplementary Figure S3.** Global histogram of per-cell "
+            "AUCell scores across the atlas. Dashed vertical lines mark "
+            "the 90th, 95th and 99th percentiles as well as the mean. "
+            "Cells above the 95th percentile form the candidate pool "
+            "for belonging to the bacTRAP target population."
         )
         fig_1d = figure_aucell_histogram(
             aucell_scores, double_column=double_column,
@@ -1211,13 +1252,18 @@ if run_button or st.session_state.analysis_done:
             )
         plt.close(fig_1d)
 
-        # Figure 1e: Composite Consensus Ranking
+        # Supplementary S11: Composite Consensus Ranking (was Figure 1e)
         st.markdown("---")
-        st.subheader("Figure 1e: Composite Consensus Ranking")
+        st.subheader("Supplementary Figure S11: Composite Consensus Ranking")
         st.markdown(
-            "Validation: consensus ranking across all methods confirms AUCell "
-            "results. Each method's scores are converted to percentile ranks "
-            "and averaged."
+            "**Supplementary Figure S11.** Composite consensus ranking "
+            "across Spearman correlation, Fisher's exact marker overlap, "
+            "NNLS deconvolution, and preranked GSEA (top 20 clusters). "
+            "Each method's cluster scores are converted to percentile "
+            "ranks (0–1) and averaged (`nanmean`, so methods with missing "
+            "data for a given cluster are excluded rather than penalised "
+            "with zero). Validation panel — confirms the AUCell-ranked "
+            "clusters are also prioritised by orthogonal methods."
         )
         if len(composite_df) > 0:
             fig_1e = figure_composite_ranking(composite_df, top_n=20, double_column=True)
@@ -1523,7 +1569,7 @@ if run_button or st.session_state.analysis_done:
             f"AUCell enrichment score projected onto the HypoMap UMAP "
             f"alongside the cell-type annotation for side-by-side comparison. "
             f"The left panel highlights the top-15 AUCell-ranked clusters "
-            f"(matching figures 1b/1c); all other cells are greyed out. "
+            f"(matching main figures 1b/1c); all other cells are greyed out. "
             f"Score computed from the top **{len(top_enriched_genes)}** enriched "
             f"genes (padj < {padj_cutoff}, log₂FC > {log2fc_cutoff})."
         )
@@ -1947,7 +1993,7 @@ if run_button or st.session_state.analysis_done:
                     aucell_table_bytes["aucell_per_cell"],
                     "aucell_per_cell.csv", "text/csv",
                     key="dl_aucell_per_cell_export",
-                    help="cell_id, cluster, aucell_score — raw data for figures 1a, 1c, 1d.",
+                    help="cell_id, cluster, aucell_score — raw data for figures 1a, 1c and supplementary S3.",
                 )
             with col_a2:
                 st.download_button(
@@ -1957,7 +2003,7 @@ if run_button or st.session_state.analysis_done:
                     key="dl_aucell_per_cluster_export",
                     help=(
                         "cluster, n_cells, mean, median, std, sem, t_stat, pvalue, "
-                        "qvalue, significant — raw data for figure 1b."
+                        "qvalue, significant — raw data for figures 1b/1c and supplementary S2."
                     ),
                 )
 
