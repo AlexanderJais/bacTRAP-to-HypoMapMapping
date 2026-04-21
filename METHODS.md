@@ -6,7 +6,7 @@
 
 ## bacTRAP translational profiling
 
-Translating ribosome affinity purification (bacTRAP) was performed on preoptic area (PoA) tissue from mice expressing a Cre-dependent EGFP-tagged ribosomal subunit (EGFP-L10a) in a cell-type-specific manner. Immunoprecipitated (IP) and total input mRNA were profiled by RNA-seq. Reads were aligned and quantified to obtain per-gene FPKM values across three biological replicates per condition. Differential expression between IP and Input was performed using DESeq2 (Love et al., 2014), yielding log2 fold changes and Benjamini-Hochberg adjusted p-values (padj) for each gene. Genes with padj < 0.05 and log2FC > 1 were classified as significantly enriched in the bacTRAP translational profile.
+Translating ribosome affinity purification (bacTRAP) was performed on preoptic area (PoA) tissue from mice expressing a Cre-dependent EGFP-tagged ribosomal subunit (EGFP-L10a) in a cell-type-specific manner. Immunoprecipitated (IP) and total input mRNA were profiled by RNA-seq. Reads were aligned and quantified to obtain per-gene FPKM values across three biological replicates per condition. Differential expression between IP and Input was performed using DESeq2 (Love et al., 2014), yielding log2 fold changes and Benjamini-Hochberg adjusted p-values (padj) for each gene. Genes with padj < 0.05 and log2FC > 1 were classified as significantly enriched in the bacTRAP translational profile. To suppress the DESeq2 low-count inflation artefact (genes with near-zero Input reads receiving spuriously large fold changes from pseudocount division), an additional minimum mean IP expression filter (default baseMean ≥ 10) was applied. Signature gene sets used by the downstream scoring methods were ranked by the π-score of Xiao et al. (|log₂FC| × −log₁₀(padj); Xiao et al., *Bioinformatics* 2014), which balances effect size against statistical significance; raw log₂FC and −log₁₀(padj) were available as alternative ranking metrics.
 
 ## Single-cell reference atlas
 
@@ -26,7 +26,7 @@ Cluster-specific marker genes were identified using the Wilcoxon rank-sum test v
 
 ## UMAP enrichment projection
 
-A per-cell bacTRAP enrichment score was computed as the z-scored mean expression of the top N significantly enriched genes (default N = 50, ranked by log2FC among genes with padj < 0.05 and log2FC > 1). This score was projected onto the HypoMap UMAP embedding. For visualization, cells were randomly subsampled to 50,000 (user-configurable) while all cells were used for statistical analyses.
+The per-cell AUCell score (see *AUCell scoring* below) was projected onto the HypoMap UMAP embedding alongside the cell-type annotation, providing a visual readout of which regions of the atlas are enriched for the bacTRAP gene set. For visualization, cells were randomly subsampled to 50,000 (user-configurable) while all cells were used for statistical analyses.
 
 ## Non-negative least squares deconvolution
 
@@ -65,7 +65,7 @@ All analyses were implemented in Python 3.10+ using a custom Streamlit applicati
 
 **Supplementary Figures:**
 **(S1)** Horizontal barplot of top 20 HypoMap clusters ranked by Spearman correlation (ρ) with the bacTRAP log2FC enrichment profile. Color intensity indicates correlation strength. Hatched bars indicate clusters not significant by both Pearson and Spearman tests (p < 0.05).
-**(S2)** UMAP projection of the HypoMap single-cell atlas. Left panel: cell-type annotation. Right panel: bacTRAP enrichment score computed as the z-scored mean expression of the top 50 enriched genes, projected onto each cell (magma colormap).
+**(S2)** UMAP projection of the HypoMap single-cell atlas. Left panel: cell-type annotation. Right panel: per-cell AUCell score (rank-based enrichment of the bacTRAP gene set, see Methods) projected onto each cell (magma colormap).
 **(S3)** Volcano-style plot of marker gene overlap (Fisher's exact test). x-axis: log2(odds ratio); y-axis: -log10(p-value). Red points indicate clusters with significant overlap (p < 0.05). Top hits are labeled.
 **(S4)** Dot plot of the top bacTRAP-enriched genes across the highest-correlating HypoMap clusters. Dot size represents the fraction of cells expressing each gene (>0 threshold); color intensity represents mean expression level (viridis colormap).
 **(S5)** Z-scored heatmap of mean expression for the top 30 enriched genes across the 20 highest-correlating clusters. Row-wise z-scoring highlights cluster-specific expression patterns. Rows are ordered by hierarchical clustering (Ward's method).
@@ -94,3 +94,5 @@ Subramanian, A. et al. Gene set enrichment analysis: a knowledge-based approach 
 Virtanen, P. et al. SciPy 1.0: fundamental algorithms for scientific computing in Python. *Nat. Methods* **17**, 261–272 (2020).
 
 Wolf, F. A., Angerer, P. & Theis, F. J. SCANPY: large-scale single-cell gene expression data analysis. *Genome Biol.* **19**, 15 (2018).
+
+Xiao, Y. et al. A novel significance score for gene selection and ranking. *Bioinformatics* **30**, 801–807 (2014).

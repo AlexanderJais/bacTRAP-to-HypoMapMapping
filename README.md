@@ -88,7 +88,7 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 | **AUCell (Main Figure)** | Main Figure 1a-1e: AUCell UMAP, per-cluster barplot, violin distributions, score histogram, and composite consensus ranking |
 | **Cre-driver Check** | Sanity check: per-cluster expression of the Cre-driver gene (default `Pnoc`) across the top-ranked clusters from the composite consensus, with a configurable "fraction expressing" threshold to flag mapping hits that may reflect Cre lineage tracing rather than current expression |
 | **Correlation (Suppl.)** | Ranked cluster table + correlation barplot (Supplementary Figure S1) |
-| **UMAP Projection (Suppl.)** | Two-panel UMAP: cell types + enrichment score (Supplementary Figure S2) |
+| **UMAP Projection (Suppl.)** | Two-panel UMAP: cell types + AUCell score (Supplementary Figure S2) |
 | **Marker Overlap (Suppl.)** | Fisher's test table + Fisher volcano plot + dot plot (Supplementary Figures S3, S4) |
 | **Heatmap (Suppl.)** | Z-scored heatmap of top genes across top clusters (Supplementary Figure S5) |
 | **NNLS (Suppl.)** | NNLS weights table + weight barplot (Supplementary Figure S6) |
@@ -124,8 +124,7 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 
 ### 4. UMAP Enrichment Projection
 
-- Computes a per-cell "bacTRAP enrichment score" as the z-scored mean expression of the top N enriched genes.
-- Projects this score onto the HypoMap UMAP alongside the cell-type annotation for side-by-side comparison.
+- Projects the per-cell AUCell score (see §8) onto the HypoMap UMAP alongside the cell-type annotation for side-by-side comparison.
 - Cell-type legend placed below the annotation panel to avoid overlap.
 - Subsamples cells for rendering performance (configurable, default 50k).
 
@@ -196,7 +195,7 @@ All figures follow Nature journal specifications:
 |---|---|---|
 | **Volcano** | Scatter plot | bacTRAP gene-level volcano (log2FC vs -log10 padj), with Pnoc and top enriched genes labeled (Data Overview tab) |
 | **S1** | Horizontal barplot | Top 20 clusters by Spearman correlation, colored by rho |
-| **S2** | Two-panel UMAP | Left: cell-type annotation (legend below), Right: bacTRAP enrichment score (magma) |
+| **S2** | Two-panel UMAP | Left: cell-type annotation (legend below), Right: per-cell AUCell score (magma) |
 | **S3** | Volcano plot | log2(odds ratio) vs -log10(p-value) from Fisher's test, top hits labeled |
 | **S4** | Dot plot | Top enriched genes vs correlation-ranked clusters (size = % expressing, color = mean expression) |
 | **S5** | Heatmap | Z-scored expression, genes clustered by Ward's linkage, diverging RdBu_r colormap |
@@ -232,10 +231,12 @@ bacTRAP-to-HypoMapMapping/
 - `_extract_gene_submatrix()` -- memory-efficient column extraction with chunk processing
 - `compute_cluster_mean_expression()` -- mean expression per cluster (deduplicates index)
 - `compute_fraction_expressing()` -- fraction of cells expressing per cluster (deduplicates index)
+- `compute_single_gene_cluster_stats()` -- per-cluster mean expression + fraction expressing for one gene (Cre-driver sanity check)
 
 **`analysis.py`**
 - `compute_enrichment_correlation()` -- Pearson + Spearman correlation per cluster (NaN-safe, dedup-safe)
-- `get_enriched_genes()` -- filter by padj and log2FC thresholds (with column validation)
+- `get_enriched_genes()` -- filter by padj, log2FC, and optional minimum IP expression
+- `rank_enriched_genes()` -- rank enriched genes by π-score (default), log₂FC, or -log₁₀(padj)
 - `compute_marker_genes()` -- Wilcoxon-based marker detection via scanpy (Ensembl-to-symbol conversion)
 - `load_precomputed_markers()` -- attempts to read `.uns['rank_genes_groups']`
 - `fisher_overlap_test()` -- one-sided Fisher's exact test with FDR correction
@@ -256,7 +257,12 @@ bacTRAP-to-HypoMapMapping/
 - `figure_nnls_barplot()` -- NNLS weight barplot
 - `figure_gsea_curves()` -- running enrichment score curves
 - `figure_gsea_barplot()` -- NES barplot
-- `figure_aucell_umap()` -- AUCell UMAP projection
+- `figure_aucell_umap()` -- AUCell UMAP projection (Figure 1a)
+- `figure_aucell_cluster_barplot()` -- per-cluster AUCell means with SEM (Figure 1b)
+- `figure_aucell_violins()` -- per-cluster AUCell distributions (Figure 1c)
+- `figure_aucell_histogram()` -- global AUCell score distribution (Figure 1d)
+- `figure_composite_ranking()` -- consensus percentile heatmap across methods (Figure 1e)
+- `figure_marker_gene_diagnostic()` -- gene matching diagnostic plot (Data Overview tab)
 - `fig_to_bytes()` -- convert figure to PDF/SVG bytes
 
 ---
@@ -325,3 +331,4 @@ The tool applies five complementary approaches (correlation, Fisher's overlap, N
 - Aibar, S. et al. SCENIC: single-cell regulatory network inference and clustering. *Nature Methods* **14**, 1083--1086 (2017).
 - Love, M. I., Huber, W. & Anders, S. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. *Genome Biology* **15**, 550 (2014).
 - Wolf, F. A., Angerer, P. & Theis, F. J. SCANPY: large-scale single-cell gene expression data analysis. *Genome Biology* **19**, 15 (2018).
+- Xiao, Y. et al. A novel significance score for gene selection and ranking. *Bioinformatics* **30**, 801--807 (2014).
