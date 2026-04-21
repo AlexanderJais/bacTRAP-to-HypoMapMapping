@@ -841,6 +841,7 @@ def compute_aucell_scores(
     gene_names: List[str],
     use_raw: bool = True,
     top_fraction: float = 0.05,
+    seed: int = 0,
 ) -> np.ndarray:
     """
     Compute AUCell scores for each cell.
@@ -854,11 +855,22 @@ def compute_aucell_scores(
     - It focuses on highly expressed genes per cell
     - It's threshold-free
 
+    Tie-breaking: in sparse single-cell data thousands of genes per cell are
+    tied at low integer counts (especially 0). ``np.argpartition`` and
+    ``np.argsort`` break ties by memory layout, so signature genes at low
+    matrix indices would systematically win their ties (or lose, depending on
+    layout) — biasing AUCell scores. We add per-cell uniform jitter smaller
+    than the smallest gap between distinct expression values, which preserves
+    the order of *distinct* values but randomises the order of ties. This
+    matches R AUCell's ``ties.method = "random"`` (Aibar et al. 2017,
+    Methods §"Building the rankings").
+
     Args:
         adata: AnnData object
         gene_names: list of bacTRAP-enriched gene names
         use_raw: whether to use adata.raw for expression
         top_fraction: fraction of ranked genes to consider (default 5%)
+        seed: RNG seed for the per-cell tie-breaking jitter (reproducible)
 
     Returns:
         Array of AUCell scores, one per cell.
@@ -884,8 +896,8 @@ def compute_aucell_scores(
     n_total_genes = X.shape[1]
     n_query = len(query_idx)
 
-    logger.info("compute_aucell_scores: %d/%d genes found, %d cells, top_fraction=%.2f",
-                n_query, len(gene_names), n_cells, top_fraction)
+    logger.info("compute_aucell_scores: %d/%d genes found, %d cells, top_fraction=%.2f, seed=%d",
+                n_query, len(gene_names), n_cells, top_fraction, seed)
     if n_query == 0:
         logger.warning("  no genes found — returning zero AUCell scores")
         return np.zeros(n_cells)
@@ -905,6 +917,42 @@ def compute_aucell_scores(
     # Note: n_top >= n_query is guaranteed above, so this is always positive.
     max_auc = n_query * (n_top - (n_query - 1) / 2)
 
+    rng = np.random.default_rng(seed)
+
+    # Determine a safe jitter scale: must be smaller than the smallest gap
+    # between distinct expression values, otherwise jitter could reorder
+    # genuinely distinct values. For raw integer counts the smallest gap is 1
+    # (so jitter < 0.5 is safe). For non-integer (e.g. log-normalised) data
+    # we fall back on a sample-based estimate of half the smallest nonzero
+    # value, which is a conservative proxy for the smallest distinct gap.
+    sample_n = min(500, n_cells)
+    sample_pick = rng.choice(n_cells, sample_n, replace=False) if n_cells > sample_n else np.arange(n_cells)
+    sample_X = X[sample_pick, :]
+    if sparse.issparse(sample_X):
+        sample_X = np.asarray(sample_X.toarray())
+    else:
+        sample_X = np.asarray(sample_X)
+    sample_max = float(sample_X.max()) if sample_X.size else 0.0
+    sample_is_integer = (
+        sample_X.size > 0 and bool(np.all(sample_X == np.round(sample_X)))
+    )
+    if sample_is_integer and sample_max > 5:
+        jitter_scale = np.float32(0.49)
+        logger.info("  input looks like raw integer counts; jitter_scale=0.49")
+    else:
+        nonzero_vals = sample_X[sample_X > 0]
+        if nonzero_vals.size > 0:
+            jitter_scale = np.float32(0.49 * float(nonzero_vals.min()))
+        else:
+            jitter_scale = np.float32(1e-6)
+        logger.warning(
+            "  input does not look like raw integer counts (max=%.2f, integer=%s); "
+            "using scaled jitter (%.2e). AUCell is designed for raw counts "
+            "(Aibar et al. 2017) — set use_raw=True against an integer-count layer "
+            "for the cleanest behaviour.",
+            sample_max, sample_is_integer, float(jitter_scale),
+        )
+
     # Process in cell chunks — vectorized within each chunk
     chunk_size = 5000
     scores = np.zeros(n_cells, dtype=np.float32)
@@ -916,8 +964,16 @@ def compute_aucell_scores(
             X_chunk = np.asarray(X_chunk.toarray())
         else:
             X_chunk = np.asarray(X_chunk)
+        # Make a writable float32 copy so the in-place jitter add doesn't
+        # touch the underlying adata buffer.
+        X_chunk = X_chunk.astype(np.float32, copy=True)
 
         chunk_n = X_chunk.shape[0]
+
+        # Per-cell uniform jitter ∈ [0, jitter_scale). Smaller than the
+        # smallest distinct gap, so distinct values keep their order while
+        # ties are randomised — equivalent to ties.method="random" in R.
+        X_chunk += rng.random((chunk_n, n_total_genes), dtype=np.float32) * jitter_scale
 
         # For each cell, get top-n gene indices via argpartition (O(n) per cell)
         # Then check which are query genes and compute cumulative AUC
@@ -925,7 +981,7 @@ def compute_aucell_scores(
 
         for i in range(chunk_n):
             cell_top = top_idx[i]
-            # Sort by expression descending
+            # Sort by jittered expression descending
             order = np.argsort(X_chunk[i, cell_top])[::-1]
             sorted_top = cell_top[order]
 
