@@ -71,9 +71,23 @@ st.sidebar.subheader("Parameters")
 
 padj_cutoff = st.sidebar.slider(
     "Adjusted p-value cutoff", 0.001, 0.1, 0.05, 0.001, format="%.3f",
+    help=(
+        "Benjamini–Hochberg-adjusted p-value threshold for a bacTRAP gene to "
+        "count as 'enriched'. Works in concert with the log₂FC cutoff — "
+        "both must be satisfied. The standard DESeq2 threshold of 0.05 is "
+        "a reasonable default; lower it (e.g. 0.01) for a more stringent "
+        "signature, raise it toward 0.1 if your bacTRAP is underpowered."
+    ),
 )
 log2fc_cutoff = st.sidebar.slider(
     "log₂FC cutoff", 0.0, 5.0, 1.0, 0.25,
+    help=(
+        "Minimum log₂ fold change (IP vs Input) for a bacTRAP gene to "
+        "count as 'enriched'. 1.0 (2-fold) is the convention in the "
+        "translational-profiling literature. Pair with the Min IP "
+        "expression filter below — raising log₂FC alone admits "
+        "pseudocount artefacts from genes with near-zero Input."
+    ),
 )
 min_ip_expression = st.sidebar.slider(
     "Min IP expression (baseMean)", 0.0, 200.0, 10.0, 5.0,
@@ -108,6 +122,16 @@ _ranking_metric_map = {
 ranking_metric = _ranking_metric_map[ranking_metric_label]
 top_n_genes = st.sidebar.slider(
     "Top N genes for scoring", 10, 500, 50, 10,
+    help=(
+        "Size of the bacTRAP signature passed to AUCell, the dot plot, and "
+        "the heatmap (after the padj / log₂FC / min-IP-expression filters, "
+        "ranked by the metric above). 50 is a good balance for rank-based "
+        "scoring — small enough to stay inside the AUCell 5 %% top-ranked "
+        "window (≈ 1,500 genes on HypoMap), large enough to be robust to "
+        "dropout in any individual cell. If this exceeds "
+        "~τ × total-genes, the AUCell window is automatically widened and "
+        "the tab will warn you (see Methods, *AUCell scoring*)."
+    ),
 )
 aucell_top_fraction = st.sidebar.slider(
     "AUCell top-ranked fraction", 0.01, 0.20, 0.05, 0.01, format="%.2f",
@@ -122,9 +146,24 @@ aucell_top_fraction = st.sidebar.slider(
 )
 n_markers_per_cluster = st.sidebar.slider(
     "Marker genes per cluster", 20, 500, 100, 10,
+    help=(
+        "Number of top marker genes retrieved per HypoMap cluster (Wilcoxon "
+        "or t-test ranking via `scanpy.tl.rank_genes_groups`). These marker "
+        "sets feed Fisher's exact overlap test (Suppl. S5) and preranked "
+        "GSEA (Suppl. S9/S10). 100 is a common default; smaller sets "
+        "emphasise the very top markers per cluster, larger sets give "
+        "Fisher's test more statistical power at the cost of specificity. "
+        "Does not affect AUCell."
+    ),
 )
 min_cells_per_cluster = st.sidebar.slider(
-    "Min cells per cluster", 1, 100, 10, 1,
+    "Min cells per cluster (markers)", 1, 100, 10, 1,
+    help=(
+        "Minimum cell count required for a cluster to enter the marker / "
+        "correlation / Fisher / GSEA pipelines. Small clusters yield "
+        "unreliable Wilcoxon ranks. Distinct from 'Min cells for AUCell "
+        "top-N ranking' below, which only gates AUCell figure rankings."
+    ),
 )
 min_cells_for_rank = st.sidebar.slider(
     "Min cells for AUCell top-N ranking", 1, 200, 20, 1,
@@ -154,7 +193,14 @@ _marker_method_label = st.sidebar.selectbox(
 marker_method = "wilcoxon" if _marker_method_label.startswith("Wilcoxon") else "t-test_overestim_var"
 umap_subsample = st.sidebar.slider(
     "UMAP subsample (cells)", 10000, 200000, 50000, 5000,
-    help="Subsample cells for UMAP visualization to reduce rendering time.",
+    help=(
+        "How many cells to render in the UMAP panels (Figures 1a/1b, "
+        "Suppl. S4). Subsampling only affects rendering speed and PDF "
+        "file size — all cells are used for AUCell scoring and every "
+        "statistical test. 50 k is a readable balance for HypoMap's "
+        "~385 k cells; drop below 20 k for faster previews, raise above "
+        "100 k if you need rare clusters to survive the random sample."
+    ),
 )
 hide_unassigned = st.sidebar.checkbox(
     "Hide Unassigned / Mixed clusters in rankings",
@@ -197,6 +243,14 @@ st.sidebar.subheader("Figure Settings")
 fig_width_mode = st.sidebar.radio(
     "Figure width", ["Single column (89mm)", "Double column (183mm)"],
     index=0,
+    help=(
+        "Target print width for the exported PDF / SVG figures. Nature's "
+        "column widths are 89 mm (single) and 183 mm (double). Choose "
+        "single for individual panels that will be placed in a one-column "
+        "slot; double for figures that will span the page. Some functions "
+        "force a layout regardless (e.g. two-panel UMAPs always render at "
+        "double-column width)."
+    ),
 )
 double_column = "Double" in fig_width_mode
 
@@ -350,7 +404,15 @@ annotation_col = st.sidebar.selectbox(
     ann_cols,
     index=default_idx,
     key=annotation_col_key,
-    help="Select the cell-type annotation level from HypoMap .obs.",
+    help=(
+        "HypoMap cell-type annotation level used for every cluster-level "
+        "analysis and figure (`C7_named` … `C465_named`). Finer levels "
+        "(higher numbers) give more granular clusters but smaller cell "
+        "counts per cluster — which may push populations below the "
+        "'Min cells for AUCell top-N ranking' threshold. `C185_named` is "
+        "the HypoMap default and a reasonable starting point for "
+        "hypothalamic neuropeptide signatures."
+    ),
 )
 
 # Gene column selection for bacTRAP data
@@ -389,7 +451,13 @@ gene_col_selection = st.sidebar.selectbox(
     index=_default_gene_idx,
     help=(
         "Column in the bacTRAP file containing gene identifiers. "
-        "Auto-detected based on which column yields the most matches against HypoMap."
+        "Auto-detected by testing each candidate column against the "
+        "HypoMap symbol + Ensembl lookup and picking the highest match "
+        "rate. Both gene symbols and Ensembl IDs work. `(use row index)` "
+        "lets you use the DataFrame index when gene IDs live there. "
+        "Override only if the auto-pick looks wrong — the Gene Matching "
+        "Diagnostics section of the Data Overview tab shows the per-"
+        "column match rate that drove the auto-selection."
     ),
 )
 # Map UI selection to the internal value expected by match_genes
@@ -1356,6 +1424,11 @@ if run_button or st.session_state.analysis_done:
             top_n_sanity = st.slider(
                 "Top N clusters to display", 5, 50, 20, 1,
                 key="sanity_top_n",
+                help=(
+                    "How many of the composite-consensus top clusters to "
+                    "show on the Cre-driver sanity panel. Widens or "
+                    "narrows the barplot; does not change any computation."
+                ),
             )
             top_clusters_sanity = ranked_clusters[:top_n_sanity]
 
