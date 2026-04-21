@@ -187,6 +187,7 @@ def figure_umap_enrichment(
     max_legend_items: int = 20,
     score_title: str = "bacTRAP enrichment score (PoA)",
     score_label: str = "Enrichment score",
+    highlight_clusters: Optional[List[str]] = None,
 ) -> plt.Figure:
     """
     Two-panel UMAP: left colored by cell-type annotation, right by enrichment score.
@@ -194,6 +195,12 @@ def figure_umap_enrichment(
     *score_title* / *score_label* let the caller override the right-panel
     title and colorbar text so the same function can render either the
     z-scored mean signature or the AUCell score without duplicating code.
+
+    When *highlight_clusters* is provided, those clusters are coloured in the
+    left panel (in the order supplied) and all other cells are greyed out.
+    This keeps the annotation panel consistent with per-cluster ranking
+    figures (e.g. AUCell 1b/1c) — otherwise the default "top N by cell
+    frequency" heuristic hides small, highly-enriched populations.
     """
     logger.info("figure_umap_enrichment: %d cells, %d unique labels, subsample=%s",
                 len(umap_coords), len(np.unique(cell_labels)),
@@ -222,7 +229,16 @@ def figure_umap_enrichment(
     n_labels = len(unique_labels)
 
     other_label = None
-    if n_labels > max_legend_items:
+    if highlight_clusters is not None and len(highlight_clusters) > 0:
+        # Caller-driven selection: colour the supplied clusters in order,
+        # grey out everything else. Used by the AUCell UMAP to match the
+        # top-N cluster set shown in the ranking figures.
+        top_labels = [c for c in highlight_clusters if c in set(unique_labels)]
+        top_set = set(top_labels)
+        other_label = "Other"
+        plot_labels = np.array([l if l in top_set else other_label for l in cell_labels])
+        unique_plot = top_labels + [other_label]
+    elif n_labels > max_legend_items:
         # Keep top N by frequency, rest grouped as a catch-all
         from collections import Counter
         counts = Counter(cell_labels)
@@ -235,17 +251,43 @@ def figure_umap_enrichment(
         plot_labels = cell_labels
         unique_plot = sorted(unique_labels)
 
-    palette = get_qualitative_palette(len(unique_plot))
-    color_map = dict(zip(unique_plot, palette))
-    if other_label is not None and other_label in color_map:
+    palette = get_qualitative_palette(max(len(unique_plot) - (1 if other_label else 0), 1))
+    # Preserve caller-supplied ordering when highlight_clusters is used so
+    # the legend matches the 1b/1c rank order; otherwise zip normally.
+    color_map = {}
+    for i, l in enumerate(unique_plot):
+        if l == other_label:
+            continue
+        color_map[l] = palette[i % len(palette)]
+    if other_label is not None:
         color_map[other_label] = "#d3d3d3"
-    point_colors = [color_map[l] for l in plot_labels]
+    point_colors = np.array([color_map[l] for l in plot_labels])
 
-    ax1.scatter(
-        umap_coords[:, 0], umap_coords[:, 1],
-        c=point_colors, s=point_size, alpha=0.6,
-        edgecolors="none", rasterized=True,
-    )
+    if highlight_clusters is not None and other_label is not None:
+        # Draw the grey "Other" layer first, then each highlighted cluster
+        # on top — otherwise small populations (e.g. Chat.GABA-7) get buried
+        # under ~380k grey cells from the rng-shuffled concatenation.
+        is_other = plot_labels == other_label
+        ax1.scatter(
+            umap_coords[is_other, 0], umap_coords[is_other, 1],
+            c=point_colors[is_other], s=point_size, alpha=0.4,
+            edgecolors="none", rasterized=True,
+        )
+        for cl in top_labels:
+            mask = plot_labels == cl
+            if not mask.any():
+                continue
+            ax1.scatter(
+                umap_coords[mask, 0], umap_coords[mask, 1],
+                c=[color_map[cl]], s=point_size * 2.5, alpha=0.95,
+                edgecolors="none", rasterized=True,
+            )
+    else:
+        ax1.scatter(
+            umap_coords[:, 0], umap_coords[:, 1],
+            c=point_colors, s=point_size, alpha=0.6,
+            edgecolors="none", rasterized=True,
+        )
     ax1.set_xlabel("UMAP1")
     ax1.set_ylabel("UMAP2")
     ax1.set_title("Cell-type annotation")
@@ -1007,6 +1049,21 @@ def figure_aucell_violins(
     ax.set_yticklabels(top_clusters, fontsize=6)
     ax.set_xlabel("AUCell score")
     ax.set_title("AUCell score distribution (top %d clusters)" % top_n)
+
+    # Highest-mean cluster at the top of the plot (top_clusters[0]) rather
+    # than at y=0 which matplotlib renders at the bottom.
+    ax.invert_yaxis()
+
+    # Explicit legend for mean/median — without it the two vertical ticks
+    # inside each horizontal violin read as an ambiguous "I"-shape.
+    legend_handles = [
+        plt.Line2D([0], [0], color="black", linewidth=0.8, label="mean"),
+        plt.Line2D([0], [0], color="grey", linewidth=0.5, linestyle="--", label="median"),
+    ]
+    ax.legend(
+        handles=legend_handles, loc="lower right", fontsize=5,
+        frameon=False, handlelength=1.5, handletextpad=0.4,
+    )
 
     logger.info("figure_aucell_violins: %d clusters shown", len(top_clusters))
 

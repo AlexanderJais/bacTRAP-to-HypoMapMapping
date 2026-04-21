@@ -961,7 +961,10 @@ if run_button or st.session_state.analysis_done:
         st.subheader("Figure 1c: AUCell Score Distributions (Top Clusters)")
         st.markdown(
             "Violin plots showing the full distribution of AUCell scores within "
-            "each top-ranked cluster. Solid line = mean, dashed = median."
+            "each top-ranked cluster, ordered so the highest-mean cluster sits "
+            "at the top. The short **black** vertical bar inside each violin "
+            "marks the mean; the **grey dashed** bar marks the median (when "
+            "they overlap they look like a single I-shape — see the legend)."
         )
         fig_1c = figure_aucell_violins(
             aucell_scores, cell_labels,
@@ -1344,11 +1347,16 @@ if run_button or st.session_state.analysis_done:
         st.markdown(
             f"AUCell enrichment score projected onto the HypoMap UMAP "
             f"alongside the cell-type annotation for side-by-side comparison. "
+            f"The left panel highlights the top-15 AUCell-ranked clusters "
+            f"(matching figures 1b/1c); all other cells are greyed out. "
             f"Score computed from the top **{len(top_enriched_genes)}** enriched "
             f"genes (padj < {padj_cutoff}, log₂FC > {log2fc_cutoff})."
         )
 
         st.subheader("Supplementary Figure S2: UMAP AUCell Map")
+        _top15_aucell_clusters = (
+            aucell_per_cluster_df.head(15)["cluster"].astype(str).tolist()
+        )
         fig_b = figure_umap_enrichment(
             umap_coords=umap_coords,
             cell_labels=cell_labels,
@@ -1358,6 +1366,7 @@ if run_button or st.session_state.analysis_done:
             subsample_idx=sub_indices,
             score_title="AUCell enrichment score",
             score_label="AUCell score",
+            highlight_clusters=_top15_aucell_clusters,
         )
         st.pyplot(fig_b)
         _cache_fig("fig_s2_umap_enrichment", fig_b)
