@@ -448,10 +448,15 @@ def figure_dotplot(
     vmin = np.nanmin(mean_flat) if np.any(np.isfinite(mean_flat)) else 0
     vmax = np.nanmax(mean_flat) if np.any(np.isfinite(mean_flat)) else 1
 
+    # rasterized=True — thin black edge strokes on hundreds of gene-cluster
+    # dots otherwise emit thousands of vector paths to the PDF/SVG, making
+    # the exported file slow to open and large on disk. The 300 DPI raster
+    # resolution preserves the edge definition for publication print.
     ax.scatter(
         x_flat, y_flat, s=sizes, c=mean_flat, cmap="viridis",
         vmin=vmin, vmax=vmax,
         edgecolors="black", linewidths=0.3, zorder=3,
+        rasterized=True,
     )
 
     ax.set_xticks(range(n_clusters))

@@ -577,7 +577,15 @@ def _extract_gene_submatrix(
     if n_genes == 0:
         return np.empty((n_cells, 0), dtype=np.float32), survived_mask
 
-    # For small gene sets, direct column slicing is fine
+    # Sparse column access on CSR is expensive because fancy indexing
+    # converts the whole matrix to CSC internally. The large-set chunked
+    # path below used to pay that conversion cost once per chunk (≈150
+    # full passes over nnz on HypoMap). Convert to CSC once up-front so
+    # subsequent column slicing is O(nnz of the selected columns).
+    if sparse.issparse(X) and X.getformat() != "csc":
+        X = X.tocsc()
+
+    # For small gene sets, a single fancy-indexed slice is fine.
     if n_genes <= 500:
         X_sub = X[:, gene_indices]
         if sparse.issparse(X_sub):
@@ -586,7 +594,9 @@ def _extract_gene_submatrix(
             result = np.asarray(X_sub)
         return result, survived_mask
 
-    # For larger sets, process in chunks to limit peak memory
+    # For larger sets, process in chunks to limit peak memory. X is now
+    # CSC (if it was sparse to begin with) so each chunk's column slice
+    # is cheap; peak memory is bounded by (n_cells x chunk_size) floats.
     chunk_size = 200
     out = np.empty((n_cells, n_genes), dtype=np.float32)
     for start in range(0, n_genes, chunk_size):

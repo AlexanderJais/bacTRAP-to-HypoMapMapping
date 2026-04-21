@@ -813,6 +813,11 @@ def compute_gsea_enrichment(
     N = len(ranked_genes)
     # Pre-compute lowercase names once (avoids repeated .lower() in loops)
     ranked_lower = np.array([g.lower() for g in ranked_genes])
+    # Wrap in a pandas Series once so the per-cluster membership test can
+    # use the vectorised C-level `isin` instead of an N-long Python list
+    # comprehension. On HypoMap (~30k genes × ~185 clusters) this removes
+    # a ~5.5M-iteration Python loop from the GSEA hot path.
+    ranked_series = pd.Series(ranked_lower)
 
     # Pre-generate all permutation indices at once
     rng = np.random.default_rng(42)
@@ -825,8 +830,10 @@ def compute_gsea_enrichment(
 
     for cluster, markers in cluster_markers.items():
         marker_set = set(g.lower() for g in markers)
-        # Boolean hit mask — vectorised membership test
-        hit_mask = np.array([g in marker_set for g in ranked_lower])
+        # Boolean hit mask — vectorised membership test (pandas isin uses
+        # a hash-based lookup under the hood; ~20–100× faster than the
+        # previous Python-level `[g in marker_set for g in ranked_lower]`).
+        hit_mask = ranked_series.isin(marker_set).to_numpy()
         n_hits = int(hit_mask.sum())
 
         es, running = _running_enrichment_score_vec(hit_mask, abs_enrichment)
