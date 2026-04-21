@@ -151,10 +151,16 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 ### 8. AUCell Scoring
 
 - Computes per-cell enrichment scores using the Area Under the recovery Curve method (Aibar et al., *Nature Methods* 2017).
-- For each cell: ranks all genes by expression, then measures how quickly the bacTRAP-enriched gene set is recovered in the top-ranked genes.
+- For each cell: ranks all genes by expression, then measures how quickly the bacTRAP-enriched gene set is recovered in the top-ranked genes (default top 5%).
 - Advantages over simple z-scored mean: rank-based (normalization-insensitive), focuses on highly expressed genes, threshold-free.
 - Vectorized implementation processes cells in chunks with `np.cumsum`-based AUC for performance on large atlases.
-- Output: per-cell AUCell scores projected onto the HypoMap UMAP.
+- Output: per-cell AUCell scores projected onto the HypoMap UMAP (main Figure 1a; also used for the two-panel S2 UMAP).
+
+### 9. Cre-driver Expression Check
+
+- Orthogonal sanity check against the composite consensus: reports per-cluster mean expression and fraction expressing for the Cre-driver gene itself (default `Pnoc`; configurable).
+- Flags clusters that rank highly in the bacTRAP mapping but show low current expression of the Cre driver — these hits may reflect Cre lineage tracing rather than ongoing transcription.
+- Output: barplot of fraction-expressing per cluster with the user-defined threshold marked.
 
 ---
 

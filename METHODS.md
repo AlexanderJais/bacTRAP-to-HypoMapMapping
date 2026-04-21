@@ -6,7 +6,9 @@
 
 ## bacTRAP translational profiling
 
-Translating ribosome affinity purification (bacTRAP) was performed on preoptic area (PoA) tissue from mice expressing a Cre-dependent EGFP-tagged ribosomal subunit (EGFP-L10a) in a cell-type-specific manner. Immunoprecipitated (IP) and total input mRNA were profiled by RNA-seq. Reads were aligned and quantified to obtain per-gene FPKM values across three biological replicates per condition. Differential expression between IP and Input was performed using DESeq2 (Love et al., 2014), yielding log2 fold changes and Benjamini-Hochberg adjusted p-values (padj) for each gene. Genes with padj < 0.05 and log2FC > 1 were classified as significantly enriched in the bacTRAP translational profile. To suppress the DESeq2 low-count inflation artefact (genes with near-zero Input reads receiving spuriously large fold changes from pseudocount division), an additional minimum mean IP expression filter (default baseMean ≥ 10) was applied. Signature gene sets used by the downstream scoring methods were ranked by the π-score of Xiao et al. (|log₂FC| × −log₁₀(padj); Xiao et al., *Bioinformatics* 2014), which balances effect size against statistical significance; raw log₂FC and −log₁₀(padj) were available as alternative ranking metrics.
+Translating ribosome affinity purification (bacTRAP) was performed on preoptic area (PoA) tissue from mice expressing a Cre-dependent EGFP-tagged ribosomal subunit (EGFP-L10a) in a cell-type-specific manner. Immunoprecipitated (IP) and total input mRNA were profiled by RNA-seq. Reads were aligned and quantified to obtain per-gene FPKM values across three biological replicates per condition. Differential expression between IP and Input was performed using DESeq2 (Love et al., 2014), yielding log2 fold changes and Benjamini-Hochberg adjusted p-values (padj) for each gene. Genes with padj < 0.05 and log2FC > 1 were classified as significantly enriched in the bacTRAP translational profile.
+
+To suppress the DESeq2 low-count inflation artefact — in which genes with near-zero Input reads receive spuriously large fold changes from pseudocount division — an additional minimum mean IP expression filter (default baseMean ≥ 10) was applied. Signature gene sets used by the downstream scoring methods were ranked by the π-score (|log₂FC| × −log₁₀(padj); Xiao et al., 2014), which balances effect size against statistical significance; raw log₂FC and −log₁₀(padj) were available as alternative ranking metrics.
 
 ## Single-cell reference atlas
 
@@ -43,6 +45,10 @@ Per-cell enrichment was additionally quantified using the AUCell method (Aibar e
 ## Composite consensus ranking
 
 To integrate results across all methods, a composite ranking was generated. For each method (Spearman correlation, Fisher's exact test, NNLS, and GSEA NES), cluster scores were converted to percentile ranks scaled from 0 to 1. The composite score for each cluster was computed as the arithmetic mean of its percentile ranks across all methods that returned results for that cluster (methods with missing data for a cluster were excluded via `nanmean` rather than penalized with a zero score). Clusters were ranked by descending composite score.
+
+## Cre-driver expression sanity check
+
+As an orthogonal confirmation that top-ranked clusters correspond to the intended Cre-expressing population (rather than clusters that merely share an expression profile), per-cluster mean expression and fraction expressing were computed for the Cre-driver gene itself (default `Pnoc` for Pnoc-Cre lines; user-configurable). Clusters were flagged as "expressing" when the fraction of cells with non-zero raw counts exceeded a user-defined threshold (default 5%). This diagnostic is intended to help discriminate mapping hits that reflect current transcription from those that may reflect Cre lineage tracing in cells that no longer express the driver.
 
 ## Figure generation
 
