@@ -109,6 +109,17 @@ ranking_metric = _ranking_metric_map[ranking_metric_label]
 top_n_genes = st.sidebar.slider(
     "Top N genes for scoring", 10, 500, 50, 10,
 )
+aucell_top_fraction = st.sidebar.slider(
+    "AUCell top-ranked fraction", 0.01, 0.20, 0.05, 0.01, format="%.2f",
+    help=(
+        "Fraction of genes (ranked by expression within each cell) in which "
+        "the bacTRAP signature must appear to contribute to the AUCell score. "
+        "Smaller = more stringent: at 0.01 only cells where the signature "
+        "concentrates in the top 1% of expressed genes score highly. "
+        "AUCell default is 0.05 (Aibar et al. 2017). Use 0.01–0.03 for a "
+        "more conservative call on bacTRAP-target identity."
+    ),
+)
 n_markers_per_cluster = st.sidebar.slider(
     "Marker genes per cluster", 20, 500, 100, 10,
 )
@@ -394,7 +405,7 @@ _analysis_params = (
     bactrap_file.strip(), hypomap_file.strip(),
     _gene_col_for_matching, annotation_col,
     padj_cutoff, log2fc_cutoff, min_ip_expression, ranking_metric,
-    top_n_genes,
+    top_n_genes, aucell_top_fraction,
     n_markers_per_cluster, min_cells_per_cluster, marker_method,
     umap_subsample,
 )
@@ -573,7 +584,31 @@ if run_button or st.session_state.analysis_done:
         progress.progress(80, text="Computing AUCell scores...")
 
         # ---- AUCell scoring ----
-        aucell_scores = compute_aucell_scores(adata, top_enriched_genes)
+        aucell_scores = compute_aucell_scores(
+            adata, top_enriched_genes, top_fraction=aucell_top_fraction,
+        )
+
+        # ---- AUCell result tables (raw data underlying figures 1a–1d) ----
+        _cell_labels_arr = adata.obs[annotation_col].values.astype(str)
+        aucell_per_cell_df = pd.DataFrame({
+            "cell_id": adata.obs_names.astype(str),
+            "cluster": _cell_labels_arr,
+            "aucell_score": aucell_scores,
+        })
+        _grp = aucell_per_cell_df.groupby("cluster")["aucell_score"]
+        aucell_per_cluster_df = pd.DataFrame({
+            "n_cells": _grp.count(),
+            "mean": _grp.mean(),
+            "median": _grp.median(),
+            "std": _grp.std(ddof=1),
+        })
+        aucell_per_cluster_df["sem"] = (
+            aucell_per_cluster_df["std"] / np.sqrt(aucell_per_cluster_df["n_cells"])
+        )
+        aucell_per_cluster_df = (
+            aucell_per_cluster_df.sort_values("mean", ascending=False)
+            .reset_index()
+        )
 
         progress.progress(85, text="Computing composite ranking...")
 
@@ -624,6 +659,8 @@ if run_button or st.session_state.analysis_done:
             "gsea_running_scores": gsea_running_scores,
             "gsea_ranked_genes": gsea_ranked_genes,
             "aucell_scores": aucell_scores,
+            "aucell_per_cell_df": aucell_per_cell_df,
+            "aucell_per_cluster_df": aucell_per_cluster_df,
             "composite_df": composite_df,
             "sub_indices": sub_indices,
             "umap_coords": umap_coords,
@@ -657,6 +694,8 @@ if run_button or st.session_state.analysis_done:
         gsea_running_scores = _c["gsea_running_scores"]
         gsea_ranked_genes = _c["gsea_ranked_genes"]
         aucell_scores = _c["aucell_scores"]
+        aucell_per_cell_df = _c["aucell_per_cell_df"]
+        aucell_per_cluster_df = _c["aucell_per_cluster_df"]
         composite_df = _c["composite_df"]
         sub_indices = _c["sub_indices"]
         umap_coords = _c["umap_coords"]
@@ -705,9 +744,23 @@ if run_button or st.session_state.analysis_done:
     # or parameters changed), not on every Streamlit rerun.
     if _need_recompute:
         st.session_state.fig_bytes = {}
+        st.session_state.table_bytes = {}
 
     if "fig_bytes" not in st.session_state:
         st.session_state.fig_bytes = {}
+    if "table_bytes" not in st.session_state:
+        st.session_state.table_bytes = {}
+
+    # Pre-encode AUCell result tables once per run so 400k-row CSVs
+    # don't get re-serialised on every Streamlit rerun / download click.
+    if "aucell_per_cell" not in st.session_state.table_bytes:
+        st.session_state.table_bytes["aucell_per_cell"] = (
+            aucell_per_cell_df.to_csv(index=False).encode()
+        )
+    if "aucell_per_cluster" not in st.session_state.table_bytes:
+        st.session_state.table_bytes["aucell_per_cluster"] = (
+            aucell_per_cluster_df.to_csv(index=False).encode()
+        )
 
     def _cache_fig(name, fig):
         st.session_state.fig_bytes[name] = {
@@ -840,7 +893,7 @@ if run_button or st.session_state.analysis_done:
         st.pyplot(fig_1a)
         _cache_fig("fig_1a_aucell_umap", fig_1a)
 
-        col_pdf, col_svg = st.columns(2)
+        col_pdf, col_svg, col_csv = st.columns(3)
         with col_pdf:
             st.download_button(
                 "Download PDF",
@@ -854,6 +907,14 @@ if run_button or st.session_state.analysis_done:
                 st.session_state.fig_bytes["fig_1a_aucell_umap"]["svg"],
                 "fig_1a_aucell_umap.svg", "image/svg+xml",
                 key="dl_fig_1a_svg",
+            )
+        with col_csv:
+            st.download_button(
+                "Download CSV (per-cell)",
+                st.session_state.table_bytes["aucell_per_cell"],
+                "aucell_per_cell.csv", "text/csv",
+                key="dl_fig_1a_csv",
+                help="cell_id, cluster, aucell_score for every HypoMap cell.",
             )
         plt.close(fig_1a)
 
@@ -871,7 +932,7 @@ if run_button or st.session_state.analysis_done:
         st.pyplot(fig_1b)
         _cache_fig("fig_1b_aucell_barplot", fig_1b)
 
-        col_pdf, col_svg = st.columns(2)
+        col_pdf, col_svg, col_csv = st.columns(3)
         with col_pdf:
             st.download_button(
                 "Download PDF",
@@ -885,6 +946,14 @@ if run_button or st.session_state.analysis_done:
                 st.session_state.fig_bytes["fig_1b_aucell_barplot"]["svg"],
                 "fig_1b_aucell_barplot.svg", "image/svg+xml",
                 key="dl_fig_1b_svg",
+            )
+        with col_csv:
+            st.download_button(
+                "Download CSV (per-cluster)",
+                st.session_state.table_bytes["aucell_per_cluster"],
+                "aucell_per_cluster.csv", "text/csv",
+                key="dl_fig_1b_csv",
+                help="cluster, n_cells, mean, median, std, sem — sorted by mean descending.",
             )
         plt.close(fig_1b)
 
@@ -901,7 +970,7 @@ if run_button or st.session_state.analysis_done:
         st.pyplot(fig_1c)
         _cache_fig("fig_1c_aucell_violins", fig_1c)
 
-        col_pdf, col_svg = st.columns(2)
+        col_pdf, col_svg, col_csv = st.columns(3)
         with col_pdf:
             st.download_button(
                 "Download PDF",
@@ -915,6 +984,14 @@ if run_button or st.session_state.analysis_done:
                 st.session_state.fig_bytes["fig_1c_aucell_violins"]["svg"],
                 "fig_1c_aucell_violins.svg", "image/svg+xml",
                 key="dl_fig_1c_svg",
+            )
+        with col_csv:
+            st.download_button(
+                "Download CSV (per-cell)",
+                st.session_state.table_bytes["aucell_per_cell"],
+                "aucell_per_cell.csv", "text/csv",
+                key="dl_fig_1c_csv",
+                help="Per-cell AUCell scores; filter by cluster to reconstruct each violin.",
             )
         plt.close(fig_1c)
 
@@ -931,7 +1008,7 @@ if run_button or st.session_state.analysis_done:
         st.pyplot(fig_1d)
         _cache_fig("fig_1d_aucell_histogram", fig_1d)
 
-        col_pdf, col_svg = st.columns(2)
+        col_pdf, col_svg, col_csv = st.columns(3)
         with col_pdf:
             st.download_button(
                 "Download PDF",
@@ -945,6 +1022,14 @@ if run_button or st.session_state.analysis_done:
                 st.session_state.fig_bytes["fig_1d_aucell_histogram"]["svg"],
                 "fig_1d_aucell_histogram.svg", "image/svg+xml",
                 key="dl_fig_1d_svg",
+            )
+        with col_csv:
+            st.download_button(
+                "Download CSV (per-cell)",
+                st.session_state.table_bytes["aucell_per_cell"],
+                "aucell_per_cell.csv", "text/csv",
+                key="dl_fig_1d_csv",
+                help="Per-cell AUCell scores — source data for the histogram.",
             )
         plt.close(fig_1d)
 
@@ -1567,12 +1652,16 @@ if run_button or st.session_state.analysis_done:
 
         # Build ZIP from cached figure bytes (no regeneration needed)
         cached_bytes = st.session_state.get("fig_bytes", {})
+        cached_tables = st.session_state.get("table_bytes", {})
         if cached_bytes:
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for name, fmt_dict in cached_bytes.items():
                     zf.writestr(f"{name}.pdf", fmt_dict["pdf"])
                     zf.writestr(f"{name}.svg", fmt_dict["svg"])
+                # Include AUCell raw-data tables alongside the figures
+                for tbl_name, tbl_bytes in cached_tables.items():
+                    zf.writestr(f"{tbl_name}.csv", tbl_bytes)
                 # Include log file
                 if _LOG_FILE.is_file():
                     zf.writestr("bactrap_hypomap.log", _LOG_FILE.read_text(errors="replace"))
@@ -1659,6 +1748,27 @@ if run_button or st.session_state.analysis_done:
                 "composite_ranking.csv", "text/csv",
                 key="dl_composite_csv_export",
             )
+
+        # AUCell raw data — pre-encoded in table_bytes (populated during run)
+        aucell_table_bytes = st.session_state.get("table_bytes", {})
+        if "aucell_per_cell" in aucell_table_bytes:
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                st.download_button(
+                    "AUCell per-cell scores (CSV)",
+                    aucell_table_bytes["aucell_per_cell"],
+                    "aucell_per_cell.csv", "text/csv",
+                    key="dl_aucell_per_cell_export",
+                    help="cell_id, cluster, aucell_score — raw data for figures 1a, 1c, 1d.",
+                )
+            with col_a2:
+                st.download_button(
+                    "AUCell per-cluster summary (CSV)",
+                    aucell_table_bytes["aucell_per_cluster"],
+                    "aucell_per_cluster.csv", "text/csv",
+                    key="dl_aucell_per_cluster_export",
+                    help="cluster, n_cells, mean, median, std, sem — raw data for figure 1b.",
+                )
 
         st.markdown("---")
         st.subheader("Diagnostics")
