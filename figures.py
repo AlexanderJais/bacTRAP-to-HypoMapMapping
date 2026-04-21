@@ -84,6 +84,53 @@ def get_qualitative_palette(n: int) -> List[str]:
         return (base + extra)[:n]
 
 
+def _add_umap_axis_arrows(
+    ax,
+    x_label: str = "UMAP1",
+    y_label: str = "UMAP2",
+    length: float = 0.14,
+    origin: tuple = (0.02, 0.02),
+    linewidth: float = 0.9,
+    fontsize: float = 6,
+) -> None:
+    """Draw two small axis arrows in the bottom-left corner of a UMAP panel.
+
+    Replaces the conventional x/y axes on dimensionality-reduction plots with
+    the compact convention common in single-cell publications: two arrows
+    anchored at the bottom-left, labelled "UMAP1" / "UMAP2". *length* and
+    *origin* are expressed in axes fraction coordinates, so the arrows scale
+    with the panel and stay in the corner regardless of data range.
+
+    Call after all data have been plotted so annotations sit on top.
+    """
+    x0, y0 = origin
+    arrow_style = dict(
+        arrowstyle="-|>,head_length=3,head_width=2",
+        linewidth=linewidth,
+        color="black",
+        shrinkA=0, shrinkB=0,
+    )
+    ax.annotate(
+        "", xy=(x0 + length, y0), xytext=(x0, y0),
+        xycoords="axes fraction", textcoords="axes fraction",
+        arrowprops=arrow_style,
+    )
+    ax.annotate(
+        "", xy=(x0, y0 + length), xytext=(x0, y0),
+        xycoords="axes fraction", textcoords="axes fraction",
+        arrowprops=arrow_style,
+    )
+    ax.text(
+        x0 + length + 0.005, y0, x_label,
+        transform=ax.transAxes, ha="left", va="center", fontsize=fontsize,
+    )
+    ax.text(
+        x0, y0 + length + 0.005, y_label,
+        transform=ax.transAxes, ha="center", va="bottom", fontsize=fontsize,
+        rotation=90, rotation_mode="anchor",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Supplementary Figure S1: Correlation Barplot
 # ---------------------------------------------------------------------------
@@ -881,10 +928,15 @@ def figure_aucell_umap(
     point_size: float = 0.3,
     subsample_idx: Optional[np.ndarray] = None,
 ) -> plt.Figure:
-    """UMAP colored by AUCell enrichment scores."""
+    """Publication-ready UMAP coloured by AUCell enrichment scores.
+
+    Title and axis labels are omitted (belong in the figure caption) and the
+    conventional x/y axes are replaced with two bottom-left arrows via
+    `_add_umap_axis_arrows`, matching the single-cell publication convention.
+    """
     setup_nature_style()
     width = get_figure_width(double_column)
-    height = width * 0.8
+    height = width * 0.9
 
     fig, ax = plt.subplots(figsize=(width, height))
 
@@ -907,17 +959,104 @@ def figure_aucell_umap(
         edgecolors="none", rasterized=True,
         vmin=vmin, vmax=vmax,
     )
-    ax.set_xlabel("UMAP1")
-    ax.set_ylabel("UMAP2")
-    ax.set_title("AUCell enrichment score (PoA bacTRAP)")
     ax.set_xticks([])
     ax.set_yticks([])
     for spine in ax.spines.values():
         spine.set_visible(False)
 
-    cbar = fig.colorbar(sc, ax=ax, shrink=0.7, aspect=20, pad=0.02)
+    _add_umap_axis_arrows(ax)
+
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.6, aspect=20, pad=0.02)
     cbar.set_label("AUCell score", fontsize=6)
     cbar.ax.tick_params(labelsize=5)
+    cbar.outline.set_linewidth(0.4)
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Main Figure: Cell-type annotation UMAP (top-N highlighted)
+# ---------------------------------------------------------------------------
+
+def figure_celltype_umap(
+    umap_coords: np.ndarray,
+    cell_labels: np.ndarray,
+    highlight_clusters: List[str],
+    double_column: bool = False,
+    point_size: float = 0.3,
+    subsample_idx: Optional[np.ndarray] = None,
+) -> plt.Figure:
+    """Publication-ready UMAP coloured by cell-type annotation.
+
+    The clusters in *highlight_clusters* (in the supplied order — typically
+    top-N by AUCell mean) are drawn in colour on top of a grey "Other" layer,
+    so small but highly enriched populations remain visible. Axis labels and
+    title are omitted; a legend sits to the right of the panel and the two
+    bottom-left arrows mark UMAP1 / UMAP2.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+    height = width * 0.9
+
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    if subsample_idx is not None:
+        umap_coords = umap_coords[subsample_idx]
+        cell_labels = cell_labels[subsample_idx]
+
+    rng = np.random.default_rng(42)
+    order = rng.permutation(len(umap_coords))
+    umap_coords = umap_coords[order]
+    cell_labels = cell_labels[order]
+
+    unique = set(np.unique(cell_labels).tolist())
+    top_labels = [c for c in highlight_clusters if c in unique]
+    top_set = set(top_labels)
+
+    palette = get_qualitative_palette(max(len(top_labels), 1))
+    color_map = {cl: palette[i % len(palette)] for i, cl in enumerate(top_labels)}
+    other_color = "#d9d9d9"
+
+    is_other = np.array([lbl not in top_set for lbl in cell_labels])
+    ax.scatter(
+        umap_coords[is_other, 0], umap_coords[is_other, 1],
+        c=other_color, s=point_size, alpha=0.4,
+        edgecolors="none", rasterized=True,
+    )
+    for cl in top_labels:
+        mask = cell_labels == cl
+        if not mask.any():
+            continue
+        ax.scatter(
+            umap_coords[mask, 0], umap_coords[mask, 1],
+            c=[color_map[cl]], s=point_size * 2.5, alpha=0.95,
+            edgecolors="none", rasterized=True,
+        )
+
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+
+    _add_umap_axis_arrows(ax)
+
+    handles = [
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=color_map[cl], markersize=3.5, label=cl)
+        for cl in top_labels
+    ]
+    handles.append(
+        plt.Line2D([0], [0], marker="o", color="w",
+                   markerfacecolor=other_color, markersize=3.5, label="Other")
+    )
+    ax.legend(
+        handles=handles, loc="center left", bbox_to_anchor=(1.02, 0.5),
+        fontsize=5, frameon=False, handletextpad=0.3,
+        labelspacing=0.35, borderaxespad=0,
+    )
+
+    logger.info("figure_celltype_umap: %d highlighted clusters",
+                len(top_labels))
 
     return fig
 
@@ -1048,7 +1187,7 @@ def figure_aucell_violins(
     ax.set_yticks(range(len(top_clusters)))
     ax.set_yticklabels(top_clusters, fontsize=6)
     ax.set_xlabel("AUCell score")
-    ax.set_title("AUCell score distribution (top %d clusters)" % top_n)
+    ax.tick_params(axis="x", labelsize=6)
 
     # Highest-mean cluster at the top of the plot (top_clusters[0]) rather
     # than at y=0 which matplotlib renders at the bottom.

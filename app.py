@@ -277,6 +277,7 @@ from figures import (
     figure_gsea_curves,
     figure_gsea_barplot,
     figure_aucell_umap,
+    figure_celltype_umap,
     figure_aucell_cluster_barplot,
     figure_aucell_violins,
     figure_aucell_histogram,
@@ -917,6 +918,53 @@ if run_button or st.session_state.analysis_done:
                 help="cell_id, cluster, aucell_score for every HypoMap cell.",
             )
         plt.close(fig_1a)
+
+        # Figure 1a2: Cell-type annotation UMAP (top-15 AUCell clusters)
+        st.subheader("Figure 1a (ii): Cell-type Annotation UMAP")
+        st.markdown(
+            "Same UMAP layout as figure 1a, coloured by HypoMap cell-type "
+            "annotation. Only the **top-15** clusters by AUCell mean are "
+            "highlighted (matching figures 1b/1c); all other cells are "
+            "drawn in light grey so small but highly enriched populations "
+            "remain visible."
+        )
+        _top15_aucell_clusters_ct = (
+            aucell_per_cluster_df.head(15)["cluster"].astype(str).tolist()
+        )
+        fig_1a_ct = figure_celltype_umap(
+            umap_coords=umap_coords,
+            cell_labels=cell_labels,
+            highlight_clusters=_top15_aucell_clusters_ct,
+            double_column=double_column,
+            subsample_idx=sub_indices,
+        )
+        st.pyplot(fig_1a_ct)
+        _cache_fig("fig_1a_celltype_umap", fig_1a_ct)
+
+        col_pdf, col_svg, col_csv = st.columns(3)
+        with col_pdf:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_1a_celltype_umap"]["pdf"],
+                "fig_1a_celltype_umap.pdf", "application/pdf",
+                key="dl_fig_1a_ct_pdf",
+            )
+        with col_svg:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_1a_celltype_umap"]["svg"],
+                "fig_1a_celltype_umap.svg", "image/svg+xml",
+                key="dl_fig_1a_ct_svg",
+            )
+        with col_csv:
+            st.download_button(
+                "Download CSV (per-cluster mean)",
+                st.session_state.table_bytes["aucell_per_cluster"],
+                "aucell_per_cluster.csv", "text/csv",
+                key="dl_fig_1a_ct_csv",
+                help="Top-15 rows are the highlighted clusters in this panel.",
+            )
+        plt.close(fig_1a_ct)
 
         # Figure 1b: AUCell Cluster Barplot
         st.subheader("Figure 1b: AUCell Score per Cluster")
