@@ -463,6 +463,23 @@ gene_col_selection = st.sidebar.selectbox(
 # Map UI selection to the internal value expected by match_genes
 _gene_col_for_matching = "_index" if gene_col_selection == "(use row index)" else gene_col_selection
 
+# Early validation: catch a stale / invalid gene-column selection here, not
+# 100 lines later deep inside match_genes. Columns can disappear between
+# the initial widget render and a rerun (e.g. after the user edits the
+# bacTRAP file). The `_index` sentinel is always valid because every
+# DataFrame has an index.
+if (
+    _gene_col_for_matching != "_index"
+    and _gene_col_for_matching not in bactrap_df.columns
+):
+    st.error(
+        f"Selected bacTRAP gene column **`{_gene_col_for_matching}`** is "
+        f"not present in the bacTRAP file. Available columns: "
+        f"`{list(bactrap_df.columns)}`. Pick a different column in the "
+        f"sidebar."
+    )
+    st.stop()
+
 # ---------------------------------------------------------------------------
 # Run analysis
 # ---------------------------------------------------------------------------
@@ -511,9 +528,21 @@ if run_button or st.session_state.analysis_done:
 
         if len(matched_genes) == 0:
             progress.empty()
-            st.error("No genes could be matched between the bacTRAP data and HypoMap. "
-                     "Check that gene_name symbols in your bacTRAP file correspond to "
-                     "gene names in the HypoMap atlas.")
+            st.error(
+                f"**No genes matched.** The selected gene column "
+                f"**`{_gene_col_for_matching}`** produced zero matches against "
+                f"the HypoMap atlas lookup (size ≈ {len(_adata_lookup):,}).\n\n"
+                f"**How to fix:**\n"
+                f"1. Open the **Data Overview** tab and check **Gene Matching "
+                f"Diagnostics** — it shows sample gene IDs from both sides so "
+                f"you can see whether you're passing symbols where Ensembl IDs "
+                f"are expected (or vice versa).\n"
+                f"2. Override **bacTRAP gene column** in the sidebar and try "
+                f"the column with the highest match rate.\n"
+                f"3. If no column works, the atlas may be in a different "
+                f"species or use an unusual symbol convention — check the "
+                f"sample atlas keys logged to `bactrap_hypomap.log`."
+            )
             st.stop()
 
         progress.progress(10, text="Genes matched. Computing cluster means...")
@@ -581,12 +610,27 @@ if run_button or st.session_state.analysis_done:
                     markers = None  # mismatch — recompute for the selected annotation
             if markers is None:
                 with st.spinner("Computing marker genes (this may take several minutes)..."):
-                    markers = compute_marker_genes(
-                        adata, annotation_col,
-                        n_genes=n_markers_per_cluster,
-                        min_cells=min_cells_per_cluster,
-                        method=marker_method,
-                    )
+                    try:
+                        markers = compute_marker_genes(
+                            adata, annotation_col,
+                            n_genes=n_markers_per_cluster,
+                            min_cells=min_cells_per_cluster,
+                            method=marker_method,
+                        )
+                    except Exception as e:
+                        # Common on pathologically small atlases or when
+                        # min_cells_per_cluster is too aggressive for the
+                        # selected annotation level. Fisher / GSEA / dotplot
+                        # will all degrade gracefully on an empty marker dict.
+                        logger.exception("Marker gene computation failed")
+                        st.warning(
+                            f"Marker gene computation failed: {e}. "
+                            f"Fisher overlap, GSEA, dotplot and heatmap panels "
+                            f"will be unavailable. Try lowering "
+                            f"'Min cells per cluster (markers)' or selecting "
+                            f"a coarser annotation level."
+                        )
+                        markers = {}
             st.session_state["_markers_cache"] = {
                 "params": _markers_params, "markers": markers,
             }
@@ -660,7 +704,13 @@ if run_button or st.session_state.analysis_done:
                 bactrap_matched, markers, n_perm=1000,
             )
         except Exception as e:
-            st.warning(f"GSEA computation failed: {e}")
+            # Full traceback to the log file so the operator can diagnose
+            # post-hoc; UI gets a short message.
+            logger.exception("GSEA computation failed")
+            st.warning(
+                f"GSEA computation failed: {e}. See `bactrap_hypomap.log` "
+                f"for the full traceback. Analysis continues without GSEA."
+            )
             gsea_df = pd.DataFrame()
             gsea_running_scores = {}
             gsea_ranked_genes = np.array([])

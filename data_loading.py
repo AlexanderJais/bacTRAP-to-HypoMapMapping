@@ -352,6 +352,22 @@ def match_genes(
     logger.info("  unmatched sample: %s", unmatched_sample)
 
     if len(matched_rows) == 0:
+        # Loud, actionable failure — otherwise downstream just sees an
+        # empty DataFrame and surfaces "no genes pass enrichment thresholds"
+        # much later, without a breadcrumb back to the matching step.
+        _bt_sample = [str(v) for v in bt_gene_values[:5]]
+        _atlas_sample = list(adata_gene_lookup.keys())[:5]
+        logger.error(
+            "match_genes: 0 / %d bacTRAP genes matched the atlas lookup. "
+            "gene_col='%s', atlas lookup size=%d. "
+            "Sample bacTRAP values: %s. Sample atlas keys: %s. "
+            "The selected gene column probably does not contain symbols / "
+            "Ensembl IDs recognised by HypoMap — check the 'Gene Matching "
+            "Diagnostics' panel in the Data Overview tab and try another "
+            "column from the bacTRAP file.",
+            len(bt_gene_values), gene_col, len(adata_gene_lookup),
+            _bt_sample, _atlas_sample,
+        )
         empty_df = bactrap_df.iloc[:0].copy()
         empty_df["_hypomap_gene_name"] = pd.Series(dtype=str)
         return empty_df, [], {}, has_raw
@@ -657,6 +673,11 @@ def compute_cluster_mean_expression(
 
     Returns a DataFrame with shape (n_survived_genes, n_clusters).
     """
+    if annotation_col not in adata.obs.columns:
+        raise ValueError(
+            f"Annotation column '{annotation_col}' not found in adata.obs. "
+            f"Available columns: {list(adata.obs.columns)}"
+        )
     gene_indices_arr = np.array(gene_indices)
     labels = adata.obs[annotation_col].values
 
@@ -724,6 +745,11 @@ def compute_fraction_expressing(
 
     Returns a DataFrame with shape (n_survived_genes, n_clusters).
     """
+    if annotation_col not in adata.obs.columns:
+        raise ValueError(
+            f"Annotation column '{annotation_col}' not found in adata.obs. "
+            f"Available columns: {list(adata.obs.columns)}"
+        )
     gene_indices_arr = np.array(gene_indices)
     labels = adata.obs[annotation_col].values
 

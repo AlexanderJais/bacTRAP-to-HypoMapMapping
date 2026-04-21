@@ -50,6 +50,15 @@ def compute_enrichment_correlation(
     Hochberg FDR, and significance flags use the adjusted values so the
     "both_significant" column reflects multiple-testing-controlled calls.
     """
+    # Stable output schema — every return (success or early exit) must have
+    # these exact columns so downstream `"both_significant" in df.columns`
+    # checks disappear and consumers (app.py, CSV export) don't need to
+    # branch on schema variations.
+    _CORR_COLUMNS = [
+        "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
+        "n_genes", "pearson_padj", "spearman_padj", "both_significant",
+    ]
+
     logger.info("compute_enrichment_correlation: %d bacTRAP genes, %d expr genes, %d clusters",
                 len(bactrap_matched), len(cluster_mean_expr), len(cluster_mean_expr.columns))
     # Align genes between bacTRAP and cluster expression
@@ -60,10 +69,7 @@ def compute_enrichment_correlation(
 
     if len(common) < 3:
         logger.warning("  <3 common genes — skipping correlation")
-        return pd.DataFrame(columns=[
-            "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
-            "n_genes",
-        ])
+        return pd.DataFrame(columns=_CORR_COLUMNS)
 
     # Build aligned enrichment vector (deduplicate bacTRAP genes — keep first)
     bt_dedup = bactrap_matched.drop_duplicates(subset="_hypomap_gene_name", keep="first")
@@ -89,10 +95,7 @@ def compute_enrichment_correlation(
     logger.info("  genes for correlation: %d, clusters: %d", len(enrichment), len(expr_sub.columns))
     if len(enrichment) < 3:
         logger.warning("  <3 valid genes after NaN removal — skipping correlation")
-        return pd.DataFrame(columns=[
-            "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
-            "n_genes",
-        ])
+        return pd.DataFrame(columns=_CORR_COLUMNS)
 
     # Row-standardise expression across clusters per gene so correlation
     # measures cluster *specificity* rather than absolute expression.
@@ -110,10 +113,7 @@ def compute_enrichment_correlation(
         enrichment = enrichment[informative]
     if len(enrichment) < 3:
         logger.warning("  <3 informative genes — skipping correlation")
-        return pd.DataFrame(columns=[
-            "cluster", "pearson_r", "pearson_pval", "spearman_r", "spearman_pval",
-            "n_genes",
-        ])
+        return pd.DataFrame(columns=_CORR_COLUMNS)
     expr_z = (expr_values - row_mean) / row_std
     expr_sub = pd.DataFrame(
         expr_z, index=expr_sub.index[informative], columns=expr_sub.columns,
@@ -142,27 +142,29 @@ def compute_enrichment_correlation(
         })
 
     df = pd.DataFrame(results)
-    if len(df) > 0:
-        # BH-FDR across clusters — without this, "significance" is inflated
-        # because each cluster's p-value is independently computed over
-        # ~hundreds of genes and many will cross p<0.05 under weak signal.
-        from statsmodels.stats.multitest import multipletests
-        _, pearson_padj, _, _ = multipletests(df["pearson_pval"].values, method="fdr_bh")
-        _, spearman_padj, _, _ = multipletests(df["spearman_pval"].values, method="fdr_bh")
-        df["pearson_padj"] = pearson_padj
-        df["spearman_padj"] = spearman_padj
-        df = df.sort_values("spearman_r", ascending=False).reset_index(drop=True)
-        # Flag clusters where both Pearson and Spearman pass FDR — concordance
-        # between parametric and rank-based tests under multiple-testing
-        # correction is stronger evidence than either nominal p-value alone.
-        df["both_significant"] = (df["pearson_padj"] < 0.05) & (df["spearman_padj"] < 0.05)
-        n_both = int(df["both_significant"].sum())
-        logger.info("  correlation result: %d clusters, top spearman_r=%.4f (%s), "
-                    "%d/%d significant by both Pearson and Spearman (FDR<0.05)",
-                    len(df), df["spearman_r"].iloc[0], df["cluster"].iloc[0],
-                    n_both, len(df))
-    else:
-        logger.warning("  correlation result: 0 clusters (all had zero variance)")
+    if len(df) == 0:
+        # Preserve the schema even when every cluster had zero variance —
+        # downstream code can rely on the column set without guards.
+        return pd.DataFrame(columns=_CORR_COLUMNS)
+
+    # BH-FDR across clusters — without this, "significance" is inflated
+    # because each cluster's p-value is independently computed over
+    # ~hundreds of genes and many will cross p<0.05 under weak signal.
+    from statsmodels.stats.multitest import multipletests
+    _, pearson_padj, _, _ = multipletests(df["pearson_pval"].values, method="fdr_bh")
+    _, spearman_padj, _, _ = multipletests(df["spearman_pval"].values, method="fdr_bh")
+    df["pearson_padj"] = pearson_padj
+    df["spearman_padj"] = spearman_padj
+    df = df.sort_values("spearman_r", ascending=False).reset_index(drop=True)
+    # Flag clusters where both Pearson and Spearman pass FDR — concordance
+    # between parametric and rank-based tests under multiple-testing
+    # correction is stronger evidence than either nominal p-value alone.
+    df["both_significant"] = (df["pearson_padj"] < 0.05) & (df["spearman_padj"] < 0.05)
+    n_both = int(df["both_significant"].sum())
+    logger.info("  correlation result: %d clusters, top spearman_r=%.4f (%s), "
+                "%d/%d significant by both Pearson and Spearman (FDR<0.05)",
+                len(df), df["spearman_r"].iloc[0], df["cluster"].iloc[0],
+                n_both, len(df))
     return df
 
 
@@ -623,9 +625,17 @@ def compute_nnls_deconvolution(
     Solves: ``min ||A_z @ w - b_c||_2``  subject to ``w >= 0``.
 
     Returns:
-        DataFrame with columns: cluster, weight, weight_norm (0–1 scaled),
-        sorted by weight descending.
+        DataFrame with columns ``cluster``, ``weight``, ``weight_norm``
+        (sum-to-1 rescaling of ``weight``), and ``global_residual_norm``
+        (the scalar ‖Aw − b‖₂ returned by scipy's NNLS, repeated on every
+        row so the CSV / downstream pipelines see a stable schema).
+        Sorted by ``weight`` descending.
     """
+    # Stable output schema — referenced by app.py caching and CSV export.
+    # Every early-exit path must return a DataFrame with these exact columns
+    # (empty but typed) so consumers never branch on schema variations.
+    _NNLS_COLUMNS = ["cluster", "weight", "weight_norm", "global_residual_norm"]
+
     logger.info("compute_nnls_deconvolution: %d bacTRAP genes, %d expr genes, %d clusters",
                 len(bactrap_matched), len(cluster_mean_expr), len(cluster_mean_expr.columns))
     bt_dedup = bactrap_matched.drop_duplicates(subset="_hypomap_gene_name", keep="first")
@@ -636,7 +646,7 @@ def compute_nnls_deconvolution(
 
     if len(common) < 5:
         logger.warning("  <5 common genes — skipping NNLS")
-        return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
+        return pd.DataFrame(columns=_NNLS_COLUMNS)
 
     bt_lookup = dict(zip(bt_dedup["_hypomap_gene_name"], bt_dedup[enrichment_col]))
     enrichment = np.array([bt_lookup[g] for g in common], dtype=float)
@@ -645,7 +655,7 @@ def compute_nnls_deconvolution(
     common = common[valid]
 
     if len(enrichment) < 5:
-        return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
+        return pd.DataFrame(columns=_NNLS_COLUMNS)
 
     expr_sub = cluster_mean_expr.loc[common]
     if expr_sub.index.duplicated().any():
@@ -676,7 +686,7 @@ def compute_nnls_deconvolution(
 
     if len(common) < 5:
         logger.warning("  <5 informative genes — skipping NNLS")
-        return pd.DataFrame(columns=["cluster", "weight", "weight_norm"])
+        return pd.DataFrame(columns=_NNLS_COLUMNS)
 
     A = (A_raw - row_mean) / row_std  # z-score across clusters, per gene
 
