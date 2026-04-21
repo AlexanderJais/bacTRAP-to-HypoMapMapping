@@ -487,12 +487,36 @@ def fisher_overlap_test(
         a = n_overlap
         b = n_enriched - n_overlap
         c = n_markers - n_overlap
-        d = max(universe_size - n_enriched - n_markers + n_overlap, 0)
+        d = universe_size - n_enriched - n_markers + n_overlap
 
-        table = np.array([[a, b], [c, d]])
-        odds_ratio, pvalue = stats.fisher_exact(table, alternative="greater")
+        # When `d` (the "neither" cell) is < 5, Fisher's exact test is
+        # essentially uninformative — odds_ratio explodes to infinity for
+        # d=0 and the "greater" alternative is trivially satisfied. A
+        # mis-set `universe_size` is the usual cause. Emit NaN so the
+        # cluster drops out of downstream ranking / FDR rather than
+        # silently topping the list with a sentinel odds-ratio.
+        if d < 5:
+            logger.warning(
+                "fisher_overlap_test: cluster %s has d=%d < 5 "
+                "(universe=%d, enriched=%d, markers=%d, overlap=%d); "
+                "marking pvalue/odds_ratio as NaN. Verify universe_size.",
+                cluster, d, universe_size, n_enriched, n_markers, n_overlap,
+            )
+            odds_ratio, pvalue = np.nan, np.nan
+        else:
+            table = np.array([[a, b], [c, d]])
+            odds_ratio, pvalue = stats.fisher_exact(table, alternative="greater")
 
         overlap_names = sorted([enriched_original.get(g, g) for g in overlap])
+
+        # Non-finite odds-ratio / log-OR become NaN (was 999.0 / 10.0
+        # magic sentinels that looked like real values in tables).
+        or_val = float(odds_ratio) if np.isfinite(odds_ratio) else np.nan
+        log2_or = float(np.log2(or_val)) if np.isfinite(or_val) and or_val > 0 else np.nan
+        neg_log10_p = (
+            float(-np.log10(max(pvalue, 1e-300)))
+            if np.isfinite(pvalue) else np.nan
+        )
 
         results.append({
             "cluster": cluster,
@@ -500,21 +524,34 @@ def fisher_overlap_test(
             "n_enriched": n_enriched,
             "n_markers": n_markers,
             "overlap_genes": ", ".join(overlap_names),
-            "odds_ratio": odds_ratio if np.isfinite(odds_ratio) else 999.0,
+            "odds_ratio": or_val,
             "pvalue": pvalue,
-            "neg_log10_pval": -np.log10(max(pvalue, 1e-300)),
-            "log2_odds_ratio": np.log2(odds_ratio) if odds_ratio > 0 and np.isfinite(odds_ratio) else 10.0,
+            "neg_log10_pval": neg_log10_p,
+            "log2_odds_ratio": log2_or,
         })
 
     df = pd.DataFrame(results)
     if len(df) > 0:
-        # FDR correction
+        # FDR correction — mask NaN pvalues (clusters that failed the
+        # d>=5 guard) so they propagate as NaN padj instead of breaking
+        # multipletests.
         from statsmodels.stats.multitest import multipletests
-        _, padj, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
+        mask = df["pvalue"].notna().values
+        padj = np.full(len(df), np.nan)
+        if mask.any():
+            _, padj_valid, _, _ = multipletests(
+                df.loc[mask, "pvalue"].values, method="fdr_bh",
+            )
+            padj[mask] = padj_valid
         df["padj"] = padj
-        df = df.sort_values("pvalue").reset_index(drop=True)
-        n_sig = (df["padj"] < 0.05).sum()
-        logger.info("  Fisher result: %d clusters tested, %d significant (padj<0.05)", len(df), n_sig)
+        df = df.sort_values("pvalue", na_position="last").reset_index(drop=True)
+        n_sig = int((df["padj"] < 0.05).sum())
+        n_skipped = int((~mask).sum())
+        logger.info(
+            "  Fisher result: %d clusters tested (%d valid, %d skipped "
+            "for d<5), %d significant (padj<0.05)",
+            len(df), int(mask.sum()), n_skipped, n_sig,
+        )
     return df
 
 
@@ -803,12 +840,27 @@ def compute_gsea_enrichment(
         # with the same sign.  Normalizing by mean(|null|) mixes the two
         # and can inflate |NES| when the null is dominated by one sign.
         if es >= 0:
-            pos_null = null_es[null_es > 0]
-            norm = float(pos_null.mean()) if pos_null.size else 0.0
+            same_sign_null = null_es[null_es > 0]
+            norm = float(same_sign_null.mean()) if same_sign_null.size else 0.0
         else:
-            neg_null = null_es[null_es < 0]
-            norm = float(-neg_null.mean()) if neg_null.size else 0.0
-        nes = es / norm if norm > 0 else 0.0
+            same_sign_null = null_es[null_es < 0]
+            norm = float(-same_sign_null.mean()) if same_sign_null.size else 0.0
+        # When the null has no values on the same side as the observed ES
+        # (e.g. every permutation landed positive but observed ES was
+        # slightly negative), NES is undefined. Previous behaviour was to
+        # return NES=0, which collides with "ES exactly zero" and makes
+        # unreachable-null clusters look like no-enrichment hits in the
+        # NES-sorted output. Return NaN so downstream ranking / FDR
+        # handles them explicitly.
+        if norm > 0:
+            nes = es / norm
+        else:
+            logger.warning(
+                "compute_gsea_enrichment: cluster %s has empty same-sign "
+                "null (ES=%.3f, n_perm=%d); NES set to NaN.",
+                cluster, es, n_perm,
+            )
+            nes = np.nan
 
         results.append({
             "cluster": cluster,
@@ -823,10 +875,21 @@ def compute_gsea_enrichment(
         from statsmodels.stats.multitest import multipletests
         _, padj, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
         df["padj"] = padj
-        df = df.sort_values("NES", ascending=False).reset_index(drop=True)
-        n_sig = (df["padj"] < 0.05).sum()
-        logger.info("  GSEA result: %d clusters, %d significant (padj<0.05), top NES=%.2f (%s)",
-                    len(df), n_sig, df["NES"].iloc[0], df["cluster"].iloc[0])
+        # NaN NES (empty same-sign null) sorted to the end so real hits
+        # appear first.
+        df = df.sort_values(
+            "NES", ascending=False, na_position="last",
+        ).reset_index(drop=True)
+        n_sig = int((df["padj"] < 0.05).sum())
+        n_undef_nes = int(df["NES"].isna().sum())
+        top_nes = df["NES"].iloc[0]
+        top_cluster = df["cluster"].iloc[0]
+        top_str = "NaN" if pd.isna(top_nes) else f"{top_nes:.2f}"
+        logger.info(
+            "  GSEA result: %d clusters, %d significant (padj<0.05), "
+            "%d with undefined NES (empty same-sign null), top NES=%s (%s)",
+            len(df), n_sig, n_undef_nes, top_str, top_cluster,
+        )
     else:
         logger.warning("  GSEA result: 0 clusters")
 

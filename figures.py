@@ -357,8 +357,15 @@ def figure_umap_enrichment(
     )
 
     # --- Right panel: enrichment score ---
-    vmin = np.nanpercentile(enrichment_scores, 2)
-    vmax = np.nanpercentile(enrichment_scores, 98)
+    # Guard against all-NaN input — np.nanpercentile returns NaN which
+    # would leave the colorbar undefined and the scatter silently blank.
+    if np.all(np.isnan(enrichment_scores)):
+        logger.warning("figure_umap_enrichment: all enrichment scores are NaN; "
+                       "falling back to vmin=0, vmax=1 for an empty colormap")
+        vmin, vmax = 0.0, 1.0
+    else:
+        vmin = float(np.nanpercentile(enrichment_scores, 2))
+        vmax = float(np.nanpercentile(enrichment_scores, 98))
 
     sc = ax2.scatter(
         umap_coords[:, 0], umap_coords[:, 1],
@@ -950,8 +957,15 @@ def figure_aucell_umap(
     umap_coords = umap_coords[order]
     aucell_scores = aucell_scores[order]
 
-    vmin = np.nanpercentile(aucell_scores, 2)
-    vmax = np.nanpercentile(aucell_scores, 98)
+    # Guard against all-NaN input — np.nanpercentile would return NaN
+    # and leave the colorbar undefined.
+    if np.all(np.isnan(aucell_scores)):
+        logger.warning("figure_aucell_umap: all AUCell scores are NaN; "
+                       "falling back to vmin=0, vmax=1 for an empty colormap")
+        vmin, vmax = 0.0, 1.0
+    else:
+        vmin = float(np.nanpercentile(aucell_scores, 2))
+        vmax = float(np.nanpercentile(aucell_scores, 98))
 
     sc = ax.scatter(
         umap_coords[:, 0], umap_coords[:, 1],
