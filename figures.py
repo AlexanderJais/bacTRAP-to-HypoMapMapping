@@ -88,10 +88,10 @@ def _add_umap_axis_arrows(
     ax,
     x_label: str = "UMAP1",
     y_label: str = "UMAP2",
-    length: float = 0.14,
+    length: float = 0.07,
     origin: tuple = (0.02, 0.02),
-    linewidth: float = 0.9,
-    fontsize: float = 6,
+    linewidth: float = 0.5,
+    fontsize: float = 4.5,
 ) -> None:
     """Draw two small axis arrows in the bottom-left corner of a UMAP panel.
 
@@ -105,7 +105,7 @@ def _add_umap_axis_arrows(
     """
     x0, y0 = origin
     arrow_style = dict(
-        arrowstyle="-|>,head_length=3,head_width=2",
+        arrowstyle="-|>,head_length=1.5,head_width=1.0",
         linewidth=linewidth,
         color="black",
         shrinkA=0, shrinkB=0,
@@ -121,11 +121,11 @@ def _add_umap_axis_arrows(
         arrowprops=arrow_style,
     )
     ax.text(
-        x0 + length + 0.005, y0, x_label,
+        x0 + length + 0.004, y0, x_label,
         transform=ax.transAxes, ha="left", va="center", fontsize=fontsize,
     )
     ax.text(
-        x0, y0 + length + 0.005, y_label,
+        x0, y0 + length + 0.004, y_label,
         transform=ax.transAxes, ha="center", va="bottom", fontsize=fontsize,
         rotation=90, rotation_mode="anchor",
     )
