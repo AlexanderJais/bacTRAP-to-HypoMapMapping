@@ -126,6 +126,18 @@ n_markers_per_cluster = st.sidebar.slider(
 min_cells_per_cluster = st.sidebar.slider(
     "Min cells per cluster", 1, 100, 10, 1,
 )
+min_cells_for_rank = st.sidebar.slider(
+    "Min cells for AUCell top-N ranking", 1, 200, 20, 1,
+    help=(
+        "Clusters with fewer than this many cells are excluded from the "
+        "top-ranked set shown in figures 1a(ii)/1b/1c. Mean AUCell for "
+        "very small clusters is dominated by shrinkage variance, so a "
+        "2-cell cluster with a slightly above-average mean can otherwise "
+        "claim a top slot purely by chance (fix #4 from the critical "
+        "evaluation). Raw per-cluster CSV is unaffected and still contains "
+        "every cluster."
+    ),
+)
 _marker_method_label = st.sidebar.selectbox(
     "Marker test",
     ["Wilcoxon (robust, slower)", "t-test overestim_var (faster)"],
@@ -593,8 +605,39 @@ if run_button or st.session_state.analysis_done:
         progress.progress(80, text="Computing AUCell scores...")
 
         # ---- AUCell scoring ----
+        aucell_run_info: dict = {}
         aucell_scores = compute_aucell_scores(
             adata, top_enriched_genes, top_fraction=aucell_top_fraction,
+            info_out=aucell_run_info,
+        )
+
+        # Merge scoring diagnostics into the QC report so the UI surfaces
+        # match rate + n_top bumps (fixes #5 / #6) alongside the input-layer
+        # check (fix #2).
+        if aucell_run_info.get("unmatched"):
+            _u = aucell_run_info["unmatched"]
+            aucell_qc.setdefault("warnings", []).append(
+                f"{len(_u)} / {aucell_run_info['n_query_requested']} signature "
+                f"genes did not match the atlas gene-name lookup — first 20: "
+                f"{_u[:20]}. These genes contribute nothing to the score."
+            )
+        if aucell_run_info.get("n_top_bumped"):
+            aucell_qc.setdefault("warnings", []).append(
+                f"Signature ({aucell_run_info['n_query_matched']} genes) is larger "
+                f"than the requested top_fraction = {aucell_run_info['requested_top_fraction']:.2%}, "
+                f"so n_top was bumped to {aucell_run_info['n_top']} "
+                f"({aucell_run_info['effective_top_fraction']:.2%} of genes). "
+                f"The AUCell window is wider than the slider suggests — "
+                f"scores are less stringent than intended. Reduce 'Top N genes "
+                f"for scoring' or raise 'AUCell top-ranked fraction' to align "
+                f"the two."
+            )
+        aucell_qc.setdefault("info", []).append(
+            f"AUCell window: n_top = {aucell_run_info.get('n_top', '?')} genes "
+            f"({aucell_run_info.get('effective_top_fraction', 0) * 100:.2f}% of "
+            f"{adata.raw.n_vars if adata.raw is not None else adata.n_vars}); "
+            f"signature matched {aucell_run_info.get('n_query_matched', '?')} / "
+            f"{aucell_run_info.get('n_query_requested', '?')} genes."
         )
 
         progress.progress(83, text="Computing per-cluster enrichment significance...")
@@ -986,8 +1029,14 @@ if run_button or st.session_state.analysis_done:
             "drawn in light grey so small but highly enriched populations "
             "remain visible."
         )
+        _size_filtered_ranked = (
+            aucell_per_cluster_df[
+                aucell_per_cluster_df["n_cells"] >= min_cells_for_rank
+            ]
+            .sort_values("mean", ascending=False)
+        )
         _top15_aucell_clusters_ct = (
-            aucell_per_cluster_df.head(15)["cluster"].astype(str).tolist()
+            _size_filtered_ranked.head(15)["cluster"].astype(str).tolist()
         )
         fig_1a_ct = figure_celltype_umap(
             umap_coords=umap_coords,
@@ -1034,6 +1083,7 @@ if run_button or st.session_state.analysis_done:
         fig_1b = figure_aucell_cluster_barplot(
             aucell_scores, cell_labels,
             top_n=25, double_column=double_column,
+            min_cluster_cells=min_cells_for_rank,
         )
         st.pyplot(fig_1b)
         _cache_fig("fig_1b_aucell_barplot", fig_1b)
@@ -1079,6 +1129,7 @@ if run_button or st.session_state.analysis_done:
         fig_1c = figure_aucell_violins(
             aucell_scores, cell_labels,
             top_n=15, double_column=True,
+            min_cluster_cells=min_cells_for_rank,
         )
         st.pyplot(fig_1c)
         _cache_fig("fig_1c_aucell_violins", fig_1c)
@@ -1479,7 +1530,11 @@ if run_button or st.session_state.analysis_done:
 
         st.subheader("Supplementary Figure S2: UMAP AUCell Map")
         _top15_aucell_clusters = (
-            aucell_per_cluster_df.head(15)["cluster"].astype(str).tolist()
+            aucell_per_cluster_df[
+                aucell_per_cluster_df["n_cells"] >= min_cells_for_rank
+            ]
+            .sort_values("mean", ascending=False)
+            .head(15)["cluster"].astype(str).tolist()
         )
         fig_b = figure_umap_enrichment(
             umap_coords=umap_coords,

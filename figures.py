@@ -1070,14 +1070,21 @@ def figure_aucell_cluster_barplot(
     cell_labels: np.ndarray,
     top_n: int = 25,
     double_column: bool = False,
+    min_cluster_cells: int = 20,
 ) -> plt.Figure:
-    """Horizontal barplot of mean AUCell score per cluster, ranked."""
+    """Horizontal barplot of mean AUCell score per cluster, ranked.
+
+    Clusters with fewer than *min_cluster_cells* cells are excluded from the
+    ranking (fix #4: small clusters with a slightly above-average mean
+    otherwise dominate the top of the list purely due to shrinkage variance).
+    """
     setup_nature_style()
     width = get_figure_width(double_column)
 
-    # Compute mean AUCell score per cluster
+    # Compute mean AUCell score per cluster (size-filtered)
     df = pd.DataFrame({"score": aucell_scores, "cluster": cell_labels})
     cluster_stats = df.groupby("cluster")["score"].agg(["mean", "std", "count"])
+    cluster_stats = cluster_stats[cluster_stats["count"] >= min_cluster_cells]
     cluster_stats = cluster_stats.sort_values("mean", ascending=False)
     cluster_stats = cluster_stats.head(top_n).iloc[::-1]  # reverse for bottom-to-top
 
@@ -1137,13 +1144,25 @@ def figure_aucell_violins(
     cell_labels: np.ndarray,
     top_n: int = 15,
     double_column: bool = True,
+    min_cluster_cells: int = 20,
 ) -> plt.Figure:
-    """Violin plots of AUCell score distributions for top clusters."""
+    """Violin plots of AUCell score distributions for top clusters.
+
+    Clusters with fewer than *min_cluster_cells* cells are excluded from the
+    ranking (fix #4) so the highest-mean slots are not claimed by small
+    populations whose means are unstable purely due to low cell count.
+    """
     setup_nature_style()
     width = get_figure_width(double_column)
 
     df = pd.DataFrame({"score": aucell_scores, "cluster": cell_labels})
-    cluster_means = df.groupby("cluster")["score"].mean().sort_values(ascending=False)
+    cluster_counts = df.groupby("cluster")["score"].count()
+    eligible = cluster_counts[cluster_counts >= min_cluster_cells].index
+    cluster_means = (
+        df[df["cluster"].isin(eligible)]
+        .groupby("cluster")["score"].mean()
+        .sort_values(ascending=False)
+    )
     top_clusters = cluster_means.head(top_n).index.tolist()
     df_top = df[df["cluster"].isin(top_clusters)].copy()
 

@@ -21,6 +21,7 @@ from data_loading import (
     compute_cluster_mean_expression,
     compute_fraction_expressing,
     get_gene_names_from_adata,
+    _build_adata_gene_lookup,
     _looks_like_ensembl,
     _find_symbol_column,
 )
@@ -842,6 +843,7 @@ def compute_aucell_scores(
     use_raw: bool = True,
     top_fraction: float = 0.05,
     seed: int = 0,
+    info_out: Optional[Dict] = None,
 ) -> np.ndarray:
     """
     Compute AUCell scores for each cell.
@@ -871,26 +873,34 @@ def compute_aucell_scores(
         use_raw: whether to use adata.raw for expression
         top_fraction: fraction of ranked genes to consider (default 5%)
         seed: RNG seed for the per-cell tie-breaking jitter (reproducible)
+        info_out: optional dict; if provided, augmented with scoring diagnostics
+            (``n_query_matched``, ``unmatched``, ``n_top``, ``n_top_bumped``,
+            ``effective_top_fraction``) so the caller can surface them to users.
 
     Returns:
         Array of AUCell scores, one per cell.
     """
-    # Determine expression source and build gene name lookup
-    if use_raw and adata.raw is not None:
+    # Use the shared gene-name lookup built by data_loading — it resolves
+    # both symbols and Ensembl IDs, matching the lookup used everywhere else
+    # in the pipeline (fix #5: previously this function used a simpler
+    # lowercase-only lookup that silently dropped genes when the matrix
+    # layer used a different namespace than the signature).
+    lookup, source_gene_names, is_raw_lookup = _build_adata_gene_lookup(
+        adata, use_raw=use_raw,
+    )
+    if is_raw_lookup and adata.raw is not None:
         X = adata.raw.X
-        source_gene_names = get_gene_names_from_adata(adata, use_raw=True)
     else:
         X = adata.X
-        source_gene_names = get_gene_names_from_adata(adata)
 
-    gene_lower_to_idx = {str(g).lower(): i for i, g in enumerate(source_gene_names)}
-
-    # Map input genes to expression matrix column indices
-    query_idx = []
+    query_idx: List[int] = []
+    unmatched: List[str] = []
     for g in gene_names:
-        g_lower = str(g).lower()
-        if g_lower in gene_lower_to_idx:
-            query_idx.append(gene_lower_to_idx[g_lower])
+        g_lower = str(g).strip().lower()
+        if g_lower in lookup:
+            query_idx.append(lookup[g_lower][1])
+        else:
+            unmatched.append(str(g))
 
     n_cells = X.shape[0]
     n_total_genes = X.shape[1]
@@ -898,17 +908,55 @@ def compute_aucell_scores(
 
     logger.info("compute_aucell_scores: %d/%d genes found, %d cells, top_fraction=%.2f, seed=%d",
                 n_query, len(gene_names), n_cells, top_fraction, seed)
+    if unmatched:
+        _sample = unmatched[:20]
+        logger.warning(
+            "  %d/%d signature genes did not match the %s layer lookup "
+            "(first 20: %s). Check gene-namespace / alias resolution between "
+            "the bacTRAP DE table and the atlas.",
+            len(unmatched), len(gene_names),
+            "raw" if is_raw_lookup else "X",
+            _sample,
+        )
     if n_query == 0:
         logger.warning("  no genes found — returning zero AUCell scores")
+        if info_out is not None:
+            info_out.update({
+                "n_query_matched": 0,
+                "unmatched": unmatched,
+                "n_top": 0,
+                "n_top_bumped": False,
+                "effective_top_fraction": 0.0,
+            })
         return np.zeros(n_cells)
 
     # Boolean mask for query genes (vectorized membership test)
     query_mask = np.zeros(n_total_genes, dtype=bool)
     query_mask[query_idx] = True
 
-    # Number of top genes to consider per cell
-    n_top = max(int(n_total_genes * top_fraction), n_query)
+    # Number of top genes to consider per cell. When the signature is larger
+    # than top_fraction * n_total_genes, n_top is bumped to the signature
+    # size — the canonical Aibar formula requires n_top >= n_query so every
+    # hit can be recovered. Warn loudly in that case (fix #6): the user
+    # thinks they're at "top 5%" but the window is actually wider, which
+    # makes scores less stringent than the slider suggests.
+    requested_n_top = int(n_total_genes * top_fraction)
+    n_top = max(requested_n_top, n_query)
     n_top = min(n_top, n_total_genes)
+    n_top_bumped = n_top > requested_n_top
+    effective_top_fraction = float(n_top) / max(n_total_genes, 1)
+    if n_top_bumped:
+        logger.warning(
+            "  n_top bumped from %d (%.2f%% of genes) to %d (%.2f%%) to fit "
+            "the signature of %d genes. The AUCell window is wider than the "
+            "requested top_fraction — effective threshold is %.2f%%.",
+            requested_n_top, top_fraction * 100,
+            n_top, effective_top_fraction * 100,
+            n_query, effective_top_fraction * 100,
+        )
+    else:
+        logger.info("  n_top=%d (%.2f%% of %d genes)",
+                    n_top, effective_top_fraction * 100, n_total_genes)
     # Theoretical maximum of sum(cumsum(is_hit)) when all n_query query genes
     # occupy the top n_query positions:
     #   cumsum = [1, 2, ..., n_query, n_query, ..., n_query]  (n_top entries)
@@ -993,6 +1041,19 @@ def compute_aucell_scores(
 
     logger.info("  AUCell scores: mean=%.4f, std=%.4f, min=%.4f, max=%.4f",
                 float(scores.mean()), float(scores.std()), float(scores.min()), float(scores.max()))
+
+    if info_out is not None:
+        info_out.update({
+            "n_query_matched": int(n_query),
+            "n_query_requested": int(len(gene_names)),
+            "unmatched": list(unmatched),
+            "n_top": int(n_top),
+            "n_top_bumped": bool(n_top_bumped),
+            "requested_top_fraction": float(top_fraction),
+            "effective_top_fraction": float(effective_top_fraction),
+            "source_layer": "raw" if is_raw_lookup else "X",
+        })
+
     return scores
 
 
