@@ -973,7 +973,7 @@ if run_button or st.session_state.analysis_done:
         st.pyplot(fig_1c)
         _cache_fig("fig_1c_aucell_violins", fig_1c)
 
-        col_pdf, col_svg, col_csv = st.columns(3)
+        col_pdf, col_svg, col_mean, col_cell = st.columns(4)
         with col_pdf:
             st.download_button(
                 "Download PDF",
@@ -988,13 +988,25 @@ if run_button or st.session_state.analysis_done:
                 "fig_1c_aucell_violins.svg", "image/svg+xml",
                 key="dl_fig_1c_svg",
             )
-        with col_csv:
+        with col_mean:
+            st.download_button(
+                "Download CSV (per-cluster mean)",
+                st.session_state.table_bytes["aucell_per_cluster"],
+                "aucell_per_cluster.csv", "text/csv",
+                key="dl_fig_1c_mean_csv",
+                help=(
+                    "Plotted quantities: cluster, n_cells, mean (black bar), "
+                    "median (grey dashed bar), std, sem. Sorted by mean descending — "
+                    "the top 15 rows are the clusters shown in the violin."
+                ),
+            )
+        with col_cell:
             st.download_button(
                 "Download CSV (per-cell)",
                 st.session_state.table_bytes["aucell_per_cell"],
                 "aucell_per_cell.csv", "text/csv",
                 key="dl_fig_1c_csv",
-                help="Per-cell AUCell scores; filter by cluster to reconstruct each violin.",
+                help="Per-cell AUCell scores — use to reconstruct the full violin shape.",
             )
         plt.close(fig_1c)
 
