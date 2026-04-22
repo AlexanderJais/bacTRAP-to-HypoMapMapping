@@ -920,9 +920,14 @@ if run_button or st.session_state.analysis_done:
 
     # ---- Cre-driver sanity stats (up-front so the baseline filter below can
     # feed the composite ranking, and the sanity tab can reuse the cache) ----
+    # Floor at min(markers gate, AUCell gate) so the baseline filter never
+    # drops an AUCell-eligible cluster just because it fell below sanity's
+    # own size gate (user raising min_cells_per_cluster above
+    # min_cells_for_rank would otherwise silently tighten AUCell too).
+    _sanity_min_cells = min(min_cells_per_cluster, min_cells_for_rank)
     sanity_cache_key = (
         hypomap_file.strip(), annotation_col,
-        min_cells_per_cluster, sanity_gene.strip().lower(),
+        _sanity_min_cells, sanity_gene.strip().lower(),
     )
     _sanity_cached = st.session_state.get("_sanity_cache")
     if _sanity_cached is not None and _sanity_cached.get("key") == sanity_cache_key:
@@ -933,7 +938,7 @@ if run_button or st.session_state.analysis_done:
                 adata, sanity_gene.strip(), annotation_col,
                 adata_gene_lookup=_adata_lookup,
                 has_raw=_adata_has_raw,
-                min_cells=min_cells_per_cluster,
+                min_cells=_sanity_min_cells,
                 normalize=True,
             )
         st.session_state["_sanity_cache"] = {
@@ -947,13 +952,10 @@ if run_button or st.session_state.analysis_done:
     # are re-ranked against each other.  Applied post-cache so toggling the
     # slider doesn't invalidate the expensive parts of the analysis.
     baseline_allowed = None
+    baseline_filter_state = "disabled"  # "disabled" | "active" | "broken_missing_gene" | "broken_empty"
     if sanity_baseline_mean_expr > 0:
         if sanity_stats is None or len(sanity_stats) == 0:
-            st.warning(
-                f"Baseline filter is set to {sanity_baseline_mean_expr:.2f} "
-                f"but `{sanity_gene}` was not found in the atlas — filter "
-                f"ignored."
-            )
+            baseline_filter_state = "broken_missing_gene"
         else:
             baseline_allowed = set(
                 sanity_stats.index[
@@ -961,12 +963,10 @@ if run_button or st.session_state.analysis_done:
                 ].astype(str)
             )
             if len(baseline_allowed) == 0:
-                st.error(
-                    f"Baseline filter (mean {sanity_gene} ≥ "
-                    f"{sanity_baseline_mean_expr:.2f}) discards every "
-                    f"cluster. Lower the slider."
-                )
                 baseline_allowed = None
+                baseline_filter_state = "broken_empty"
+            else:
+                baseline_filter_state = "active"
 
     # ---- Optional display-time filter for Unassigned / Mixed clusters ----
     # HypoMap's "Unassigned" and "Mixed" clusters are uncurated aggregates
@@ -1018,6 +1018,15 @@ if run_button or st.session_state.analysis_done:
             top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
             top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
 
+        # zscore_df is (genes × clusters); when the filter is active the
+        # cached matrix still holds the original unfiltered top-20 columns,
+        # and the heatmap (Suppl. S5) + heatmap_zscores.csv would otherwise
+        # show clusters that fail the filter.  Recompute against the
+        # filtered top_clusters_heatmap and the full cluster_mean_expr.
+        zscore_df = compute_zscore_heatmap_data(
+            cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
+        )
+
     # Apply the baseline filter to AUCell cluster-level outputs too — the
     # user's intent is to remove Cre-driver-negative clusters from the AUC
     # (AUCell) analysis, which means the main-figure barplot (S2), violin
@@ -1029,11 +1038,22 @@ if run_button or st.session_state.analysis_done:
             aucell_per_cluster_df["cluster"].astype(str).isin(baseline_allowed)
         ].reset_index(drop=True)
 
-        _n_kept = len(baseline_allowed)
-        _n_total = len(sanity_stats) if sanity_stats is not None else 0
+    # Sidebar-side mirror of the filter state so the user sees the
+    # effective setting even if they've scrolled past the global banner.
+    if baseline_filter_state == "active":
         st.sidebar.caption(
-            f"Baseline {sanity_gene} filter: **{_n_kept}/{_n_total}** "
-            f"clusters pass mean ≥ {sanity_baseline_mean_expr:.2f}."
+            f"Baseline {sanity_gene} filter: **{len(baseline_allowed)}"
+            f"/{len(sanity_stats)}** clusters pass mean ≥ "
+            f"{sanity_baseline_mean_expr:.2f}."
+        )
+    elif baseline_filter_state == "broken_missing_gene":
+        st.sidebar.caption(
+            f":warning: `{sanity_gene}` not in atlas — filter ignored."
+        )
+    elif baseline_filter_state == "broken_empty":
+        st.sidebar.caption(
+            f":warning: threshold {sanity_baseline_mean_expr:.2f} rejects "
+            f"every cluster — filter ignored."
         )
 
     # Cache figure bytes so the Export tab doesn't regenerate them.
@@ -1070,6 +1090,48 @@ if run_button or st.session_state.analysis_done:
             "pdf": fig_to_bytes(fig, "pdf"),
             "svg": fig_to_bytes(fig, "svg"),
         }
+
+    # Filename suffix applied to filter-affected CSV downloads so a
+    # collaborator who opens a 40-row composite_ranking.csv can tell from
+    # the filename alone that it's a Pnoc-ge-0.05 subset, not the full 185.
+    # Dots are replaced with 'p' (safe on every filesystem).
+    def _filtered_name(basename: str) -> str:
+        if baseline_allowed is None:
+            return basename
+        stem, _, ext = basename.rpartition(".")
+        tag = f"{sanity_gene.lower()}_ge{sanity_baseline_mean_expr:.2f}".replace(".", "p")
+        return f"{stem}_{tag}.{ext}"
+
+    # ---- Global baseline-filter status banner (above the tab group) ----
+    # Rendered once so every tab — not just AUCell — makes the filter state
+    # obvious.  "broken_*" states are distinguished from "disabled" so a
+    # user whose threshold discards every cluster doesn't silently see an
+    # unfiltered dashboard with the slider still > 0.
+    if baseline_filter_state == "active":
+        st.info(
+            f"**Baseline {sanity_gene} filter active:** "
+            f"{len(baseline_allowed)} / {len(sanity_stats)} atlas clusters "
+            f"pass mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f}. "
+            f"Correlation, Fisher, NNLS, GSEA, composite ranking, AUCell "
+            f"cluster ranking (figs 1b / S2 / 1c), and heatmap (S5) all "
+            f"reflect this filter; AUCell UMAP (fig 1a), per-cell CSVs, "
+            f"and volcano/UMAP atlas-wide panels do not."
+        )
+    elif baseline_filter_state == "broken_missing_gene":
+        st.warning(
+            f"**Baseline filter set to {sanity_baseline_mean_expr:.2f} "
+            f"but `{sanity_gene}` was not found in the HypoMap atlas — "
+            f"filter is IGNORED; tabs below show unfiltered data.** "
+            f"Check the Cre-driver gene spelling (title-cased mouse "
+            f"symbols, e.g. `Pnoc`, not `PNOC`)."
+        )
+    elif baseline_filter_state == "broken_empty":
+        st.error(
+            f"**Baseline filter (mean {sanity_gene} ≥ "
+            f"{sanity_baseline_mean_expr:.2f}) discards every cluster — "
+            f"filter is IGNORED; tabs below show unfiltered data.** "
+            f"Lower the slider."
+        )
 
     # ======================================================================
     # TAB 1: Data Overview
@@ -1185,17 +1247,7 @@ if run_button or st.session_state.analysis_done:
             "and quantifies per-cell enrichment of the bacTRAP gene set. "
             f"Scores computed from the top **{len(top_enriched_genes)}** enriched genes."
         )
-
-        if baseline_allowed is not None:
-            st.info(
-                f"**Baseline {sanity_gene} filter active.** Only "
-                f"{len(baseline_allowed)} / {len(sanity_stats)} atlas clusters "
-                f"(mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f}) are "
-                f"eligible for the cluster ranking below. Figs 1b / S2 / 1c "
-                f"and `aucell_per_cluster.csv` reflect this filter; the "
-                f"per-cell AUCell UMAP (Fig 1a) and `aucell_per_cell.csv` "
-                f"do not — they carry no cluster identity."
-            )
+        # (Baseline-filter banner is rendered once above the tab group.)
 
         # Input-layer QC (fix #2) — warn loudly when the layer fed into
         # AUCell does not look like raw counts.
@@ -1327,7 +1379,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download CSV (per-cluster mean)",
                 st.session_state.table_bytes["aucell_per_cluster"],
-                "aucell_per_cluster.csv", "text/csv",
+                _filtered_name("aucell_per_cluster.csv"), "text/csv",
                 key="dl_fig_1a_ct_csv",
                 help="Top-15 rows are the highlighted clusters in this panel.",
             )
@@ -1377,7 +1429,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download CSV (per-cluster)",
                 st.session_state.table_bytes["aucell_per_cluster"],
-                "aucell_per_cluster.csv", "text/csv",
+                _filtered_name("aucell_per_cluster.csv"), "text/csv",
                 key="dl_fig_1b_csv",
                 help=(
                     "cluster, n_cells, mean, median, std, sem, t_stat, pvalue, "
@@ -1431,7 +1483,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download CSV (per-cluster mean)",
                 st.session_state.table_bytes["aucell_per_cluster"],
-                "aucell_per_cluster.csv", "text/csv",
+                _filtered_name("aucell_per_cluster.csv"), "text/csv",
                 key="dl_fig_1c_mean_csv",
                 help=(
                     "Plotted quantities: cluster, n_cells, mean (black bar), "
@@ -1784,7 +1836,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download correlation table (CSV)",
                 corr_df.to_csv(index=False).encode(),
-                "correlation_results.csv", "text/csv",
+                _filtered_name("correlation_results.csv"), "text/csv",
                 key="dl_corr_csv_tab2",
             )
         else:
@@ -1929,7 +1981,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download Fisher's test results (CSV)",
                 fisher_df.to_csv(index=False).encode(),
-                "fisher_test_results.csv", "text/csv",
+                _filtered_name("fisher_test_results.csv"), "text/csv",
                 key="dl_fisher_csv_tab4",
             )
         else:
@@ -2019,7 +2071,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download NNLS results (CSV)",
                 nnls_df.to_csv(index=False).encode(),
-                "nnls_results.csv", "text/csv",
+                _filtered_name("nnls_results.csv"), "text/csv",
                 key="dl_nnls_csv",
             )
         else:
@@ -2099,7 +2151,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download GSEA results (CSV)",
                 gsea_df.to_csv(index=False).encode(),
-                "gsea_results.csv", "text/csv",
+                _filtered_name("gsea_results.csv"), "text/csv",
                 key="dl_gsea_csv",
             )
         else:
@@ -2158,7 +2210,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Correlation results (CSV)",
                 corr_df.to_csv(index=False).encode(),
-                "correlation_results.csv", "text/csv",
+                _filtered_name("correlation_results.csv"), "text/csv",
                 key="dl_corr_csv_export",
             )
         with col_t2:
@@ -2166,7 +2218,7 @@ if run_button or st.session_state.analysis_done:
                 st.download_button(
                     "Fisher's test results (CSV)",
                     fisher_df.to_csv(index=False).encode(),
-                    "fisher_test_results.csv", "text/csv",
+                    _filtered_name("fisher_test_results.csv"), "text/csv",
                     key="dl_fisher_csv_export",
                 )
 
@@ -2191,7 +2243,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Z-score heatmap data (CSV)",
                 zscore_df.to_csv().encode(),
-                "zscore_heatmap.csv", "text/csv",
+                _filtered_name("zscore_heatmap.csv"), "text/csv",
                 key="dl_zscore_csv",
             )
 
@@ -2201,7 +2253,7 @@ if run_button or st.session_state.analysis_done:
                 st.download_button(
                     "NNLS results (CSV)",
                     nnls_df.to_csv(index=False).encode(),
-                    "nnls_results.csv", "text/csv",
+                    _filtered_name("nnls_results.csv"), "text/csv",
                     key="dl_nnls_csv_export",
                 )
         with col_t6:
@@ -2209,7 +2261,7 @@ if run_button or st.session_state.analysis_done:
                 st.download_button(
                     "GSEA results (CSV)",
                     gsea_df.to_csv(index=False).encode(),
-                    "gsea_results.csv", "text/csv",
+                    _filtered_name("gsea_results.csv"), "text/csv",
                     key="dl_gsea_csv_export",
                 )
 
@@ -2217,7 +2269,7 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Composite ranking (CSV)",
                 composite_df.to_csv(index=False).encode(),
-                "composite_ranking.csv", "text/csv",
+                _filtered_name("composite_ranking.csv"), "text/csv",
                 key="dl_composite_csv_export",
             )
 
@@ -2237,7 +2289,7 @@ if run_button or st.session_state.analysis_done:
                 st.download_button(
                     "AUCell per-cluster summary (CSV)",
                     aucell_table_bytes["aucell_per_cluster"],
-                    "aucell_per_cluster.csv", "text/csv",
+                    _filtered_name("aucell_per_cluster.csv"), "text/csv",
                     key="dl_aucell_per_cluster_export",
                     help=(
                         "cluster, n_cells, mean, median, std, sem, t_stat, pvalue, "
