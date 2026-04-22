@@ -1032,16 +1032,22 @@ if run_button or st.session_state.analysis_done:
             cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
         )
 
-    # Apply the baseline filter to AUCell cluster-level outputs too — the
-    # user's intent is to remove Cre-driver-negative clusters from the AUC
-    # (AUCell) analysis, which means the main-figure barplot (S2), violin
-    # panel (1c), cell-type UMAP highlight (1b), and the exported per-cluster
-    # CSV all need to honour the filter. The per-cell AUCell scores and the
-    # AUCell UMAP (fig 1a) are unchanged — they carry no cluster identity.
+    # Apply the baseline filter to every AUCell output — the user's intent is
+    # to remove Cre-driver-negative clusters from the AUCell analysis, so the
+    # cluster-level panels (barplot S2, violin 1c, cell-type UMAP highlight
+    # 1b, per-cluster CSV) AND the per-cell panels (AUCell UMAP fig 1a,
+    # per-cell CSV) all drop cells belonging to filtered-out clusters.
+    sub_indices_filtered = sub_indices
     if baseline_allowed is not None:
         aucell_per_cluster_df = aucell_per_cluster_df[
             aucell_per_cluster_df["cluster"].astype(str).isin(baseline_allowed)
         ].reset_index(drop=True)
+        _baseline_cell_mask = np.isin(cell_labels, list(baseline_allowed))
+        aucell_per_cell_df = aucell_per_cell_df[_baseline_cell_mask].reset_index(drop=True)
+        if sub_indices is None:
+            sub_indices_filtered = np.where(_baseline_cell_mask)[0]
+        else:
+            sub_indices_filtered = sub_indices[_baseline_cell_mask[sub_indices]]
 
     # Sidebar-side mirror of the filter state so the user sees the
     # effective setting even if they've scrolled past the global banner.
@@ -1073,17 +1079,17 @@ if run_button or st.session_state.analysis_done:
     if "table_bytes" not in st.session_state:
         st.session_state.table_bytes = {}
 
-    # Pre-encode AUCell result tables.  The per-cell CSV is 400k rows and
-    # never changes with display filters, so cache-by-presence.  The
-    # per-cluster CSV is ~185 rows but shrinks when the baseline filter
-    # drops clusters — re-serialise whenever the filter signature changes.
-    if "aucell_per_cell" not in st.session_state.table_bytes:
-        st.session_state.table_bytes["aucell_per_cell"] = (
-            aucell_per_cell_df.to_csv(index=False).encode()
-        )
+    # Pre-encode AUCell result tables.  Both the per-cell (~400k rows) and
+    # per-cluster (~185 rows) CSVs shrink when the baseline filter drops
+    # clusters, so re-serialise whenever the filter signature changes.
     _baseline_sig = (
         tuple(sorted(baseline_allowed)) if baseline_allowed is not None else None
     )
+    if st.session_state.table_bytes.get("_aucell_per_cell_sig") != _baseline_sig:
+        st.session_state.table_bytes["aucell_per_cell"] = (
+            aucell_per_cell_df.to_csv(index=False).encode()
+        )
+        st.session_state.table_bytes["_aucell_per_cell_sig"] = _baseline_sig
     if st.session_state.table_bytes.get("_aucell_per_cluster_sig") != _baseline_sig:
         st.session_state.table_bytes["aucell_per_cluster"] = (
             aucell_per_cluster_df.to_csv(index=False).encode()
@@ -1119,8 +1125,9 @@ if run_button or st.session_state.analysis_done:
             f"mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f}. "
             f"Applies to every cluster-level ranking (correlation, "
             f"Fisher, NNLS, GSEA, composite, AUCell cluster figs 1b / S2 "
-            f"/ 1c, heatmap S5). Per-cell panels (AUCell UMAP fig 1a, "
-            f"per-cell CSVs) are unchanged."
+            f"/ 1c, heatmap S5) **and** to the per-cell AUCell panel "
+            f"(fig 1a) and per-cell CSV, which drop cells belonging to "
+            f"filtered-out clusters."
         )
     elif baseline_filter_state == "broken_missing_gene":
         st.warning(
@@ -1280,10 +1287,17 @@ if run_button or st.session_state.analysis_done:
 
         # Figure 1a: AUCell UMAP
         st.subheader("Figure 1a: AUCell Enrichment UMAP")
+        _fig_1a_n_cells = int(len(aucell_per_cell_df))
+        _fig_1a_filter_clause = (
+            f" restricted to clusters passing the baseline {sanity_gene} "
+            f"≥ {sanity_baseline_mean_expr:.2f} filter"
+            if baseline_allowed is not None else ""
+        )
         st.markdown(
             f"**Figure 1a.** AUCell enrichment score for the bacTRAP signature "
-            f"projected onto the HypoMap UMAP embedding "
-            f"(n = {adata.n_obs:,} cells). For each cell, the area under the "
+            f"projected onto the HypoMap UMAP embedding"
+            f"{_fig_1a_filter_clause} "
+            f"(n = {_fig_1a_n_cells:,} cells). For each cell, the area under the "
             f"recovery curve for the top "
             f"**{len(top_enriched_genes)}** π-score-ranked bacTRAP-enriched "
             f"genes was computed within the top "
@@ -1298,7 +1312,7 @@ if run_button or st.session_state.analysis_done:
         fig_1a = figure_aucell_umap(
             umap_coords, aucell_scores,
             double_column=double_column,
-            subsample_idx=sub_indices,
+            subsample_idx=sub_indices_filtered,
         )
         st.pyplot(fig_1a)
         _cache_fig("fig_1a_aucell_umap", fig_1a)
@@ -1322,9 +1336,12 @@ if run_button or st.session_state.analysis_done:
             st.download_button(
                 "Download CSV (per-cell)",
                 st.session_state.table_bytes["aucell_per_cell"],
-                "aucell_per_cell.csv", "text/csv",
+                _filtered_name("aucell_per_cell.csv"), "text/csv",
                 key="dl_fig_1a_csv",
-                help="cell_id, cluster, aucell_score for every HypoMap cell.",
+                help=(
+                    "cell_id, cluster, aucell_score — filtered to "
+                    "clusters passing the baseline filter when active."
+                ),
             )
         plt.close(fig_1a)
 
@@ -2313,9 +2330,13 @@ if run_button or st.session_state.analysis_done:
                 st.download_button(
                     "AUCell per-cell scores (CSV)",
                     aucell_table_bytes["aucell_per_cell"],
-                    "aucell_per_cell.csv", "text/csv",
+                    _filtered_name("aucell_per_cell.csv"), "text/csv",
                     key="dl_aucell_per_cell_export",
-                    help="cell_id, cluster, aucell_score — raw data for figures 1a, 1c and supplementary S3.",
+                    help=(
+                        "cell_id, cluster, aucell_score — raw data for figures 1a, 1c and "
+                        "supplementary S3. Restricted to clusters passing the baseline "
+                        "filter when active."
+                    ),
                 )
             with col_a2:
                 st.download_button(
