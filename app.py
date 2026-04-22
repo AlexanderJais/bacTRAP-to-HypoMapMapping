@@ -2201,8 +2201,14 @@ if run_button or st.session_state.analysis_done:
                 for name, fmt_dict in cached_bytes.items():
                     zf.writestr(f"{name}.pdf", fmt_dict["pdf"])
                     zf.writestr(f"{name}.svg", fmt_dict["svg"])
-                # Include AUCell raw-data tables alongside the figures
+                # Include AUCell raw-data tables alongside the figures.
+                # Skip private metadata entries (e.g. cache signatures) that
+                # share this dict but aren't serialised CSV payloads.
                 for tbl_name, tbl_bytes in cached_tables.items():
+                    if tbl_name.startswith("_") or not isinstance(
+                        tbl_bytes, (bytes, bytearray, memoryview)
+                    ):
+                        continue
                     zf.writestr(f"{tbl_name}.csv", tbl_bytes)
                 # Include log file (best-effort; skip if unreadable).
                 if _LOG_FILE.is_file():
