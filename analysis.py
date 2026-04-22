@@ -15,7 +15,7 @@ import scanpy as sc
 from scipy import stats, sparse
 from scipy.optimize import nnls
 from statsmodels.stats.multitest import multipletests
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -1343,6 +1343,7 @@ def compute_composite_ranking(
     fisher_df: pd.DataFrame,
     nnls_df: pd.DataFrame,
     gsea_df: Optional[pd.DataFrame] = None,
+    allowed_clusters: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     """
     Combine multiple ranking methods into a single consensus ranking.
@@ -1351,10 +1352,30 @@ def compute_composite_ranking(
     then averaged. This produces a robust ranking that doesn't depend
     on any single method's assumptions.
 
+    If ``allowed_clusters`` is provided, each input table is restricted
+    to that set BEFORE per-method ranks / percentiles are computed, so
+    the survivors are re-ranked against each other rather than inheriting
+    their global positions. Used to drop clusters that fail a Cre-driver
+    baseline-expression check before the composite vote.
+
     Returns:
         DataFrame with columns: cluster, corr_rank, fisher_rank, nnls_rank,
         gsea_rank (if available), composite_score, sorted by composite_score.
     """
+    if allowed_clusters is not None:
+        allowed_set = {str(c) for c in allowed_clusters}
+
+        def _restrict(df):
+            if df is None or len(df) == 0 or "cluster" not in df.columns:
+                return df
+            mask = df["cluster"].astype(str).isin(allowed_set)
+            return df.loc[mask].reset_index(drop=True)
+
+        corr_df = _restrict(corr_df)
+        fisher_df = _restrict(fisher_df)
+        nnls_df = _restrict(nnls_df)
+        gsea_df = _restrict(gsea_df)
+
     # Collect rankings from each method
     rankings = {}
 

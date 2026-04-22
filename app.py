@@ -237,6 +237,20 @@ sanity_fraction_threshold = st.sidebar.slider(
         "tolerates dropout."
     ),
 )
+sanity_baseline_mean_expr = st.sidebar.slider(
+    "Baseline Cre-driver mean expression (log-norm)",
+    0.0, 1.5, 0.0, 0.01, format="%.2f",
+    help=(
+        "Drop clusters whose mean Cre-driver expression (log-normalized) "
+        "falls below this floor BEFORE the composite ranking is built — "
+        "correlation, Fisher, NNLS, and GSEA are all re-ranked against the "
+        "surviving clusters, so dropouts no longer dilute the consensus. "
+        "Set to 0.0 (default) to disable. Caveat: snRNA-seq dropout for "
+        "neuropeptides means 'not detected' ≠ 'not expressed'; a strict "
+        "floor can discard genuine positives. Start at ~0.05 and inspect "
+        "the sanity-check table to tune."
+    ),
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Figure Settings")
@@ -902,27 +916,95 @@ if run_button or st.session_state.analysis_done:
 
     st.session_state.analysis_done = True
 
+    # ---- Cre-driver sanity stats (up-front so the baseline filter below can
+    # feed the composite ranking, and the sanity tab can reuse the cache) ----
+    sanity_cache_key = (
+        hypomap_file.strip(), annotation_col,
+        min_cells_per_cluster, sanity_gene.strip().lower(),
+    )
+    _sanity_cached = st.session_state.get("_sanity_cache")
+    if _sanity_cached is not None and _sanity_cached.get("key") == sanity_cache_key:
+        sanity_stats = _sanity_cached["stats"]
+    else:
+        with st.spinner(f"Computing per-cluster {sanity_gene} expression..."):
+            sanity_stats = compute_single_gene_cluster_stats(
+                adata, sanity_gene.strip(), annotation_col,
+                adata_gene_lookup=_adata_lookup,
+                has_raw=_adata_has_raw,
+                min_cells=min_cells_per_cluster,
+                normalize=True,
+            )
+        st.session_state["_sanity_cache"] = {
+            "key": sanity_cache_key, "stats": sanity_stats,
+        }
+
+    # ---- Optional baseline Cre-driver expression filter ----
+    # When the slider is > 0, drop clusters whose mean Cre-driver expression
+    # falls below the floor BEFORE re-running the composite vote so
+    # correlation / Fisher / NNLS / GSEA all exclude them and the survivors
+    # are re-ranked against each other.  Applied post-cache so toggling the
+    # slider doesn't invalidate the expensive parts of the analysis.
+    baseline_allowed = None
+    if sanity_baseline_mean_expr > 0:
+        if sanity_stats is None or len(sanity_stats) == 0:
+            st.warning(
+                f"Baseline filter is set to {sanity_baseline_mean_expr:.2f} "
+                f"but `{sanity_gene}` was not found in the atlas — filter "
+                f"ignored."
+            )
+        else:
+            baseline_allowed = set(
+                sanity_stats.index[
+                    sanity_stats["mean_expr"] >= sanity_baseline_mean_expr
+                ].astype(str)
+            )
+            if len(baseline_allowed) == 0:
+                st.error(
+                    f"Baseline filter (mean {sanity_gene} ≥ "
+                    f"{sanity_baseline_mean_expr:.2f}) discards every "
+                    f"cluster. Lower the slider."
+                )
+                baseline_allowed = None
+
     # ---- Optional display-time filter for Unassigned / Mixed clusters ----
     # HypoMap's "Unassigned" and "Mixed" clusters are uncurated aggregates
     # that can artificially top rankings (especially GSEA) because of
     # heterogeneous membership.  Filtering is applied after the analysis
     # cache so toggling the checkbox doesn't invalidate computations; it
     # only changes what the tabs display.
-    if hide_unassigned:
+    _display_filter_active = hide_unassigned or baseline_allowed is not None
+    if _display_filter_active:
         import re as _re
         _excl_pat = _re.compile(r"Unassigned|Mixed", _re.IGNORECASE)
 
         def _filter_by_cluster(df, col="cluster"):
             if df is None or len(df) == 0 or col not in df.columns:
                 return df
-            mask = ~df[col].astype(str).str.contains(_excl_pat, na=False)
+            mask = pd.Series(True, index=df.index)
+            if hide_unassigned:
+                mask &= ~df[col].astype(str).str.contains(_excl_pat, na=False)
+            if baseline_allowed is not None:
+                mask &= df[col].astype(str).isin(baseline_allowed)
             return df[mask].reset_index(drop=True)
 
         corr_df = _filter_by_cluster(corr_df)
         fisher_df = _filter_by_cluster(fisher_df)
         nnls_df = _filter_by_cluster(nnls_df)
         gsea_df = _filter_by_cluster(gsea_df)
-        composite_df = _filter_by_cluster(composite_df)
+
+        # When the baseline filter is active, re-run the composite vote on
+        # the survivors so their percentiles reflect the restricted universe
+        # (the user-requested behavior: "correlation/Fisher/NNLS/GSEA all
+        # exclude those clusters" before the consensus is formed).  For
+        # hide_unassigned alone, filtering the cached composite by cluster
+        # is equivalent and cheaper.
+        if baseline_allowed is not None:
+            composite_df = compute_composite_ranking(
+                corr_df, fisher_df, nnls_df,
+                gsea_df if gsea_df is not None and len(gsea_df) > 0 else None,
+            )
+        else:
+            composite_df = _filter_by_cluster(composite_df)
 
         # Recompute selection lists that drive dotplot / heatmap cluster sets
         # so they stay consistent with the filtered rankings.
@@ -933,6 +1015,14 @@ if run_button or st.session_state.analysis_done:
         else:
             top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
             top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
+
+    if baseline_allowed is not None:
+        _n_kept = len(baseline_allowed)
+        _n_total = len(sanity_stats) if sanity_stats is not None else 0
+        st.sidebar.caption(
+            f"Baseline {sanity_gene} filter: **{_n_kept}/{_n_total}** "
+            f"clusters pass mean ≥ {sanity_baseline_mean_expr:.2f}."
+        )
 
     # Cache figure bytes so the Export tab doesn't regenerate them.
     # Only reset when a new analysis run is triggered (run_button pressed
@@ -1430,27 +1520,9 @@ if run_button or st.session_state.analysis_done:
             "**confidence weight**, not a hard filter."
         )
 
-        # ---- Lookup Cre-driver gene in atlas (cached per gene/annotation) ----
-        sanity_cache_key = (
-            hypomap_file.strip(), annotation_col,
-            min_cells_per_cluster, sanity_gene.strip().lower(),
-        )
-        _sanity_cached = st.session_state.get("_sanity_cache")
-        if _sanity_cached is not None and _sanity_cached.get("key") == sanity_cache_key:
-            sanity_stats = _sanity_cached["stats"]
-        else:
-            with st.spinner(f"Computing per-cluster {sanity_gene} expression..."):
-                sanity_stats = compute_single_gene_cluster_stats(
-                    adata, sanity_gene.strip(), annotation_col,
-                    adata_gene_lookup=_adata_lookup,
-                    has_raw=_adata_has_raw,
-                    min_cells=min_cells_per_cluster,
-                    normalize=True,
-                )
-            st.session_state["_sanity_cache"] = {
-                "key": sanity_cache_key, "stats": sanity_stats,
-            }
-
+        # sanity_stats is computed up-front (see post-cache block earlier)
+        # so the baseline-expression slider can feed the composite ranking.
+        # The tab just consumes the already-cached result.
         if sanity_stats is None or len(sanity_stats) == 0:
             st.error(
                 f"**`{sanity_gene}`** was not found in the HypoMap atlas. "
