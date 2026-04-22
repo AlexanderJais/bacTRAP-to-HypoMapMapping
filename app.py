@@ -2019,9 +2019,17 @@ if run_button or st.session_state.analysis_done:
                 # Include AUCell raw-data tables alongside the figures
                 for tbl_name, tbl_bytes in cached_tables.items():
                     zf.writestr(f"{tbl_name}.csv", tbl_bytes)
-                # Include log file
+                # Include log file (best-effort; skip if unreadable).
                 if _LOG_FILE.is_file():
-                    zf.writestr("bactrap_hypomap.log", _LOG_FILE.read_text(errors="replace"))
+                    try:
+                        zf.writestr(
+                            "bactrap_hypomap.log",
+                            _LOG_FILE.read_text(errors="replace"),
+                        )
+                    except OSError:
+                        logger.exception(
+                            "Failed to include log file in export ZIP",
+                        )
             buf.seek(0)
 
             st.download_button(
@@ -2133,13 +2141,25 @@ if run_button or st.session_state.analysis_done:
         st.markdown("---")
         st.subheader("Diagnostics")
         if _LOG_FILE.is_file():
-            st.download_button(
-                "Download log file",
-                _LOG_FILE.read_text(errors="replace").encode(),
-                "bactrap_hypomap.log", "text/plain",
-                use_container_width=True,
-                key="dl_log_file",
-            )
+            try:
+                _log_bytes = _LOG_FILE.read_text(errors="replace").encode()
+            except OSError as e:
+                # File exists but can't be read (permissions, lock, disk
+                # fault) — surface the reason rather than handing the user
+                # an empty download.
+                logger.exception("Failed to read log file %s", _LOG_FILE)
+                st.info(
+                    f"Log file exists at `{_LOG_FILE}` but could not be "
+                    f"read: {e}. Check file permissions."
+                )
+            else:
+                st.download_button(
+                    "Download log file",
+                    _log_bytes,
+                    "bactrap_hypomap.log", "text/plain",
+                    use_container_width=True,
+                    key="dl_log_file",
+                )
         else:
             st.info("No log file generated yet.")
 

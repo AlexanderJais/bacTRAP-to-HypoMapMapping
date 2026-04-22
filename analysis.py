@@ -7,13 +7,15 @@ GSEA-style enrichment, and AUCell scoring.
 """
 
 import logging
+import warnings
+
 import numpy as np
 import pandas as pd
 import scanpy as sc
 from scipy import stats, sparse
 from scipy.optimize import nnls
+from statsmodels.stats.multitest import multipletests
 from typing import Tuple, List, Dict, Optional
-import warnings
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +152,6 @@ def compute_enrichment_correlation(
     # BH-FDR across clusters — without this, "significance" is inflated
     # because each cluster's p-value is independently computed over
     # ~hundreds of genes and many will cross p<0.05 under weak signal.
-    from statsmodels.stats.multitest import multipletests
     _, pearson_padj, _, _ = multipletests(df["pearson_pval"].values, method="fdr_bh")
     _, spearman_padj, _, _ = multipletests(df["spearman_pval"].values, method="fdr_bh")
     df["pearson_padj"] = pearson_padj
@@ -537,7 +538,6 @@ def fisher_overlap_test(
         # FDR correction — mask NaN pvalues (clusters that failed the
         # d>=5 guard) so they propagate as NaN padj instead of breaking
         # multipletests.
-        from statsmodels.stats.multitest import multipletests
         mask = df["pvalue"].notna().values
         padj = np.full(len(df), np.nan)
         if mask.any():
@@ -889,7 +889,6 @@ def compute_gsea_enrichment(
 
     df = pd.DataFrame(results)
     if len(df) > 0:
-        from statsmodels.stats.multitest import multipletests
         _, padj, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
         df["padj"] = padj
         # NaN NES (empty same-sign null) sorted to the end so real hits
@@ -1045,7 +1044,13 @@ def compute_aucell_scores(
     # Note: n_top >= n_query is guaranteed above, so this is always positive.
     max_auc = n_query * (n_top - (n_query - 1) / 2)
 
-    rng = np.random.default_rng(seed)
+    # Two independent RNG streams so that the per-cell jitter is purely a
+    # function of `seed` and not of how many cells were sampled for the
+    # jitter-scale heuristic. Without the split, rng.choice(n_cells, ...)
+    # consumed a variable amount of state before the jitter draws, so
+    # otherwise-identical signature runs on atlases with different
+    # n_cells would produce different AUCell numbers at the same seed.
+    sampling_rng, jitter_rng = np.random.default_rng(seed).spawn(2)
 
     # Determine a safe jitter scale: must be smaller than the smallest gap
     # between distinct expression values, otherwise jitter could reorder
@@ -1054,7 +1059,10 @@ def compute_aucell_scores(
     # we fall back on a sample-based estimate of half the smallest nonzero
     # value, which is a conservative proxy for the smallest distinct gap.
     sample_n = min(500, n_cells)
-    sample_pick = rng.choice(n_cells, sample_n, replace=False) if n_cells > sample_n else np.arange(n_cells)
+    sample_pick = (
+        sampling_rng.choice(n_cells, sample_n, replace=False)
+        if n_cells > sample_n else np.arange(n_cells)
+    )
     sample_X = X[sample_pick, :]
     if sparse.issparse(sample_X):
         sample_X = np.asarray(sample_X.toarray())
@@ -1101,7 +1109,9 @@ def compute_aucell_scores(
         # Per-cell uniform jitter ∈ [0, jitter_scale). Smaller than the
         # smallest distinct gap, so distinct values keep their order while
         # ties are randomised — equivalent to ties.method="random" in R.
-        X_chunk += rng.random((chunk_n, n_total_genes), dtype=np.float32) * jitter_scale
+        X_chunk += jitter_rng.random(
+            (chunk_n, n_total_genes), dtype=np.float32,
+        ) * jitter_scale
 
         # For each cell, get top-n gene indices via argpartition (O(n) per cell)
         # Then check which are query genes and compute cumulative AUC
@@ -1311,7 +1321,6 @@ def compute_cluster_enrichment_stats(
         df["significant"] = []
         return df
 
-    from statsmodels.stats.multitest import multipletests
     _, qvals, _, _ = multipletests(df["pvalue"].values, method="fdr_bh")
     df["qvalue"] = qvals
     df["significant"] = df["qvalue"] < alpha

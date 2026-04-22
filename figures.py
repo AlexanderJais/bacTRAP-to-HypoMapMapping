@@ -13,6 +13,8 @@ All figures follow Nature journal specifications:
 
 import io
 import logging
+from collections import Counter
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -31,7 +33,23 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def setup_nature_style():
-    """Configure matplotlib for Nature-grade figures."""
+    """Configure matplotlib for Nature-grade figures.
+
+    Called at the top of every figure function rather than once at module
+    import time. This is deliberate: users (e.g. in a Jupyter notebook)
+    may have their own rcParams for other plots interleaved with these,
+    and we want each figure function to produce a consistent Nature-
+    style output regardless of ambient state. The cost is a handful of
+    dict updates per figure — negligible compared to the figure work
+    itself.
+
+    Do NOT rely on rcParams persisting between calls; treat each figure
+    function as if it owns the rcParams for its duration. If you need
+    truly scoped styling, wrap your call in ``plt.rc_context(...)``
+    around the figure function — but be aware that calling
+    ``setup_nature_style()`` inside the function will override the
+    context for its body.
+    """
     plt.rcParams.update({
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
@@ -287,7 +305,6 @@ def figure_umap_enrichment(
         unique_plot = top_labels + [other_label]
     elif n_labels > max_legend_items:
         # Keep top N by frequency, rest grouped as a catch-all
-        from collections import Counter
         counts = Counter(cell_labels)
         top_labels = [label for label, _ in counts.most_common(max_legend_items)]
         top_set = set(top_labels)
@@ -1483,8 +1500,24 @@ def figure_marker_gene_diagnostic(
 # Export utilities
 # ---------------------------------------------------------------------------
 
+_VALID_EXPORT_FORMATS = frozenset({"pdf", "svg", "png"})
+
+
 def fig_to_bytes(fig: plt.Figure, fmt: str = "pdf") -> bytes:
-    """Convert a matplotlib figure to bytes in the specified format."""
+    """Convert a matplotlib figure to bytes in the specified format.
+
+    Args:
+        fig: matplotlib figure to serialise.
+        fmt: one of ``"pdf"``, ``"svg"``, ``"png"``. A typo surfaces
+            here with a clear ValueError rather than inside matplotlib's
+            savefig dispatch (which tends to produce opaque backend
+            registration errors).
+    """
+    if fmt not in _VALID_EXPORT_FORMATS:
+        raise ValueError(
+            f"Unsupported figure format {fmt!r}; expected one of "
+            f"{sorted(_VALID_EXPORT_FORMATS)}"
+        )
     buf = io.BytesIO()
     fig.savefig(buf, format=fmt, dpi=300, bbox_inches="tight")
     buf.seek(0)
