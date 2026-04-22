@@ -242,13 +242,15 @@ sanity_baseline_mean_expr = st.sidebar.slider(
     0.0, 1.5, 0.0, 0.01, format="%.2f",
     help=(
         "Drop clusters whose mean Cre-driver expression (log-normalized) "
-        "falls below this floor BEFORE the composite ranking is built — "
-        "correlation, Fisher, NNLS, and GSEA are all re-ranked against the "
-        "surviving clusters, so dropouts no longer dilute the consensus. "
-        "Set to 0.0 (default) to disable. Caveat: snRNA-seq dropout for "
-        "neuropeptides means 'not detected' ≠ 'not expressed'; a strict "
-        "floor can discard genuine positives. Start at ~0.05 and inspect "
-        "the sanity-check table to tune."
+        "falls below this floor from the AUCell cluster ranking (figs 1b, "
+        "S2, 1c, the per-cluster CSV, and the cell-type UMAP highlight) "
+        "AND from the composite vote (correlation / Fisher / NNLS / GSEA "
+        "are re-ranked against the surviving clusters). The AUCell UMAP "
+        "and per-cell scores are unaffected — they carry no cluster "
+        "identity. Set to 0.0 (default) to disable. Caveat: snRNA-seq "
+        "dropout for neuropeptides means 'not detected' ≠ 'not expressed'; "
+        "a strict floor can discard genuine positives. Start at ~0.05 and "
+        "inspect the sanity-check table to tune."
     ),
 )
 
@@ -1016,6 +1018,17 @@ if run_button or st.session_state.analysis_done:
             top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
             top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
 
+    # Apply the baseline filter to AUCell cluster-level outputs too — the
+    # user's intent is to remove Cre-driver-negative clusters from the AUC
+    # (AUCell) analysis, which means the main-figure barplot (S2), violin
+    # panel (1c), cell-type UMAP highlight (1b), and the exported per-cluster
+    # CSV all need to honour the filter. The per-cell AUCell scores and the
+    # AUCell UMAP (fig 1a) are unchanged — they carry no cluster identity.
+    if baseline_allowed is not None:
+        aucell_per_cluster_df = aucell_per_cluster_df[
+            aucell_per_cluster_df["cluster"].astype(str).isin(baseline_allowed)
+        ].reset_index(drop=True)
+
     if baseline_allowed is not None:
         _n_kept = len(baseline_allowed)
         _n_total = len(sanity_stats) if sanity_stats is not None else 0
@@ -1036,16 +1049,22 @@ if run_button or st.session_state.analysis_done:
     if "table_bytes" not in st.session_state:
         st.session_state.table_bytes = {}
 
-    # Pre-encode AUCell result tables once per run so 400k-row CSVs
-    # don't get re-serialised on every Streamlit rerun / download click.
+    # Pre-encode AUCell result tables.  The per-cell CSV is 400k rows and
+    # never changes with display filters, so cache-by-presence.  The
+    # per-cluster CSV is ~185 rows but shrinks when the baseline filter
+    # drops clusters — re-serialise whenever the filter signature changes.
     if "aucell_per_cell" not in st.session_state.table_bytes:
         st.session_state.table_bytes["aucell_per_cell"] = (
             aucell_per_cell_df.to_csv(index=False).encode()
         )
-    if "aucell_per_cluster" not in st.session_state.table_bytes:
+    _baseline_sig = (
+        tuple(sorted(baseline_allowed)) if baseline_allowed is not None else None
+    )
+    if st.session_state.table_bytes.get("_aucell_per_cluster_sig") != _baseline_sig:
         st.session_state.table_bytes["aucell_per_cluster"] = (
             aucell_per_cluster_df.to_csv(index=False).encode()
         )
+        st.session_state.table_bytes["_aucell_per_cluster_sig"] = _baseline_sig
 
     def _cache_fig(name, fig):
         st.session_state.fig_bytes[name] = {
@@ -1324,6 +1343,7 @@ if run_button or st.session_state.analysis_done:
             aucell_scores, cell_labels,
             top_n=25, double_column=double_column,
             min_cluster_cells=min_cells_for_rank,
+            allowed_clusters=baseline_allowed,
         )
         st.pyplot(fig_1b)
         _cache_fig("fig_1b_aucell_barplot", fig_1b)
@@ -1377,6 +1397,7 @@ if run_button or st.session_state.analysis_done:
             aucell_scores, cell_labels,
             top_n=15, double_column=True,
             min_cluster_cells=min_cells_for_rank,
+            allowed_clusters=baseline_allowed,
         )
         st.pyplot(fig_1c)
         _cache_fig("fig_1c_aucell_violins", fig_1c)

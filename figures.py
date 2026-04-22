@@ -23,7 +23,7 @@ from matplotlib import cm
 import seaborn as sns
 from scipy.cluster.hierarchy import linkage, leaves_list
 from adjustText import adjust_text
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -1107,18 +1107,26 @@ def figure_aucell_cluster_barplot(
     top_n: int = 25,
     double_column: bool = False,
     min_cluster_cells: int = 20,
+    allowed_clusters: Optional[Iterable[str]] = None,
 ) -> plt.Figure:
     """Horizontal barplot of mean AUCell score per cluster, ranked.
 
     Clusters with fewer than *min_cluster_cells* cells are excluded from the
     ranking (fix #4: small clusters with a slightly above-average mean
     otherwise dominate the top of the list purely due to shrinkage variance).
+
+    If *allowed_clusters* is provided, only clusters in that set are eligible
+    for the ranking — used to hide clusters that fail a Cre-driver baseline
+    expression threshold.
     """
     setup_nature_style()
     width = get_figure_width(double_column)
 
     # Compute mean AUCell score per cluster (size-filtered)
     df = pd.DataFrame({"score": aucell_scores, "cluster": cell_labels})
+    if allowed_clusters is not None:
+        allowed_set = {str(c) for c in allowed_clusters}
+        df = df[df["cluster"].astype(str).isin(allowed_set)]
     cluster_stats = df.groupby("cluster")["score"].agg(["mean", "std", "count"])
     cluster_stats = cluster_stats[cluster_stats["count"] >= min_cluster_cells]
     cluster_stats = cluster_stats.sort_values("mean", ascending=False)
@@ -1181,17 +1189,25 @@ def figure_aucell_violins(
     top_n: int = 15,
     double_column: bool = True,
     min_cluster_cells: int = 20,
+    allowed_clusters: Optional[Iterable[str]] = None,
 ) -> plt.Figure:
     """Violin plots of AUCell score distributions for top clusters.
 
     Clusters with fewer than *min_cluster_cells* cells are excluded from the
     ranking (fix #4) so the highest-mean slots are not claimed by small
     populations whose means are unstable purely due to low cell count.
+
+    If *allowed_clusters* is provided, only clusters in that set are eligible
+    for the ranking — used to hide clusters that fail a Cre-driver baseline
+    expression threshold.
     """
     setup_nature_style()
     width = get_figure_width(double_column)
 
     df = pd.DataFrame({"score": aucell_scores, "cluster": cell_labels})
+    if allowed_clusters is not None:
+        allowed_set = {str(c) for c in allowed_clusters}
+        df = df[df["cluster"].astype(str).isin(allowed_set)]
     cluster_counts = df.groupby("cluster")["score"].count()
     eligible = cluster_counts[cluster_counts >= min_cluster_cells].index
     cluster_means = (
