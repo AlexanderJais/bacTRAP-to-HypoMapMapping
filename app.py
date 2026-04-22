@@ -232,25 +232,30 @@ sanity_fraction_threshold = st.sidebar.slider(
     "Expression threshold (fraction)",
     0.0, 0.5, 0.05, 0.01, format="%.2f",
     help=(
-        "Minimum fraction of cells expressing the Cre-driver gene for a "
-        "cluster to count as 'expressing'. 5% is a permissive default that "
-        "tolerates dropout."
+        "**Display-only.** Minimum fraction of cells expressing the "
+        "Cre-driver gene for a cluster to be flagged as 'expressing' in "
+        "the Cre-driver Check sanity table. Does NOT change any ranking "
+        "— use the baseline slider below for that. 5% is a permissive "
+        "default that tolerates dropout."
     ),
 )
 sanity_baseline_mean_expr = st.sidebar.slider(
     "Baseline Cre-driver mean expression (log-norm)",
     0.0, 1.5, 0.0, 0.01, format="%.2f",
     help=(
-        "Drop clusters whose mean Cre-driver expression (log-normalized) "
-        "falls below this floor from the AUCell cluster ranking (figs 1b, "
-        "S2, 1c, the per-cluster CSV, and the cell-type UMAP highlight) "
-        "AND from the composite vote (correlation / Fisher / NNLS / GSEA "
-        "are re-ranked against the surviving clusters). The AUCell UMAP "
-        "and per-cell scores are unaffected — they carry no cluster "
-        "identity. Set to 0.0 (default) to disable. Caveat: snRNA-seq "
-        "dropout for neuropeptides means 'not detected' ≠ 'not expressed'; "
-        "a strict floor can discard genuine positives. Start at ~0.05 and "
-        "inspect the sanity-check table to tune."
+        "**Ranking filter.** When > 0, drop clusters whose mean "
+        "(log-normalized) Cre-driver expression falls below this floor "
+        "from every cluster-level ranking: correlation / Fisher / NNLS / "
+        "GSEA / composite consensus (survivors are re-ranked against one "
+        "another), AUCell cluster figures (1b, S2, 1c), and the heatmap "
+        "(S5, with z-scores recomputed against the filtered reference). "
+        "Per-cell panels (AUCell UMAP fig 1a, per-cell CSVs) are "
+        "unaffected — they carry no cluster identity. Filtered CSV "
+        "downloads are suffixed with the filter signature "
+        "(e.g. `composite_ranking_pnoc_ge0p05.csv`). Set to 0 to disable. "
+        "Caveat: snRNA-seq dropout for neuropeptides means 'not detected' "
+        "≠ 'not expressed' — a strict floor can discard genuine positives. "
+        "Start at ~0.05 and inspect the sanity-check table to tune."
     ),
 )
 
@@ -1104,32 +1109,31 @@ if run_button or st.session_state.analysis_done:
 
     # ---- Global baseline-filter status banner (above the tab group) ----
     # Rendered once so every tab — not just AUCell — makes the filter state
-    # obvious.  "broken_*" states are distinguished from "disabled" so a
-    # user whose threshold discards every cluster doesn't silently see an
-    # unfiltered dashboard with the slider still > 0.
+    # obvious.  broken_* states distinguish "slider > 0 but doing nothing"
+    # from "slider at 0" so a user whose threshold discards everything
+    # doesn't silently see an unfiltered dashboard.
     if baseline_filter_state == "active":
         st.info(
-            f"**Baseline {sanity_gene} filter active:** "
-            f"{len(baseline_allowed)} / {len(sanity_stats)} atlas clusters "
-            f"pass mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f}. "
-            f"Correlation, Fisher, NNLS, GSEA, composite ranking, AUCell "
-            f"cluster ranking (figs 1b / S2 / 1c), and heatmap (S5) all "
-            f"reflect this filter; AUCell UMAP (fig 1a), per-cell CSVs, "
-            f"and volcano/UMAP atlas-wide panels do not."
+            f"**Baseline {sanity_gene} filter active** — "
+            f"{len(baseline_allowed)} / {len(sanity_stats)} clusters pass "
+            f"mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f}. "
+            f"Applies to every cluster-level ranking (correlation, "
+            f"Fisher, NNLS, GSEA, composite, AUCell cluster figs 1b / S2 "
+            f"/ 1c, heatmap S5). Per-cell panels (AUCell UMAP fig 1a, "
+            f"per-cell CSVs) are unchanged."
         )
     elif baseline_filter_state == "broken_missing_gene":
         st.warning(
-            f"**Baseline filter set to {sanity_baseline_mean_expr:.2f} "
-            f"but `{sanity_gene}` was not found in the HypoMap atlas — "
-            f"filter is IGNORED; tabs below show unfiltered data.** "
-            f"Check the Cre-driver gene spelling (title-cased mouse "
-            f"symbols, e.g. `Pnoc`, not `PNOC`)."
+            f"**Baseline filter ignored** — `{sanity_gene}` not found in "
+            f"the HypoMap atlas (slider at {sanity_baseline_mean_expr:.2f}). "
+            f"Tabs show unfiltered data. Check gene-symbol casing "
+            f"(e.g. `Pnoc`, not `PNOC`)."
         )
     elif baseline_filter_state == "broken_empty":
         st.error(
-            f"**Baseline filter (mean {sanity_gene} ≥ "
-            f"{sanity_baseline_mean_expr:.2f}) discards every cluster — "
-            f"filter is IGNORED; tabs below show unfiltered data.** "
+            f"**Baseline filter ignored** — threshold "
+            f"mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f} "
+            f"discards every cluster. Tabs show unfiltered data. "
             f"Lower the slider."
         )
 
@@ -1247,7 +1251,6 @@ if run_button or st.session_state.analysis_done:
             "and quantifies per-cell enrichment of the bacTRAP gene set. "
             f"Scores computed from the top **{len(top_enriched_genes)}** enriched genes."
         )
-        # (Baseline-filter banner is rendered once above the tab group.)
 
         # Input-layer QC (fix #2) — warn loudly when the layer fed into
         # AUCell does not look like raw counts.
