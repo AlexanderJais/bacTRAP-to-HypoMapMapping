@@ -1029,7 +1029,6 @@ if run_button or st.session_state.analysis_done:
             aucell_per_cluster_df["cluster"].astype(str).isin(baseline_allowed)
         ].reset_index(drop=True)
 
-    if baseline_allowed is not None:
         _n_kept = len(baseline_allowed)
         _n_total = len(sanity_stats) if sanity_stats is not None else 0
         st.sidebar.caption(
@@ -1186,6 +1185,17 @@ if run_button or st.session_state.analysis_done:
             "and quantifies per-cell enrichment of the bacTRAP gene set. "
             f"Scores computed from the top **{len(top_enriched_genes)}** enriched genes."
         )
+
+        if baseline_allowed is not None:
+            st.info(
+                f"**Baseline {sanity_gene} filter active.** Only "
+                f"{len(baseline_allowed)} / {len(sanity_stats)} atlas clusters "
+                f"(mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f}) are "
+                f"eligible for the cluster ranking below. Figs 1b / S2 / 1c "
+                f"and `aucell_per_cluster.csv` reflect this filter; the "
+                f"per-cell AUCell UMAP (Fig 1a) and `aucell_per_cell.csv` "
+                f"do not — they carry no cluster identity."
+            )
 
         # Input-layer QC (fix #2) — warn loudly when the layer fed into
         # AUCell does not look like raw counts.
@@ -1552,12 +1562,16 @@ if run_button or st.session_state.analysis_done:
             )
         else:
             # ---- Cluster ordering: composite ranking, fall back to Pnoc mean ----
+            _filter_suffix = (
+                f" (after {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f} filter)"
+                if baseline_allowed is not None else ""
+            )
             if len(composite_df) > 0:
                 ranked_clusters = composite_df["cluster"].astype(str).tolist()
-                rank_source = "composite consensus"
+                rank_source = f"composite consensus{_filter_suffix}"
             elif len(corr_df) > 0:
                 ranked_clusters = corr_df["cluster"].astype(str).tolist()
-                rank_source = "Spearman correlation"
+                rank_source = f"Spearman correlation{_filter_suffix}"
             else:
                 ranked_clusters = sanity_stats.sort_values(
                     "mean_expr", ascending=False,
