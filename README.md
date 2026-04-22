@@ -78,8 +78,9 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 | Markers per cluster | Number of marker genes per cluster for the Fisher/GSEA overlap tests | 100 |
 | Min cells per cluster | Minimum cells required to include a cluster in marker analysis | 10 |
 | UMAP subsample | Number of cells to subsample for UMAP rendering (scoring uses all cells) | 50,000 |
-| Cre-driver gene | Gene used for the Cre-driver Check sanity panel | `Pnoc` |
-| Expression threshold (fraction) | Min fraction of cells expressing the Cre-driver gene to count a cluster as "expressing" | 0.05 |
+| Cre-driver gene | Gene used for the Cre-driver Check sanity panel and the baseline filter below | `Pnoc` |
+| Expression threshold (fraction) | Display-only: min fraction of cells expressing the Cre-driver gene to flag a cluster as "expressing" in the sanity table; does **not** change any ranking | 0.05 |
+| Baseline Cre-driver mean expression (log-norm) | **Ranking filter.** When > 0, drop clusters whose mean (log-normalised) Cre-driver expression falls below this floor before correlation / Fisher / NNLS / GSEA / composite consensus and the AUCell cluster rankings (figs 1b / S2 / 1c); survivors are re-ranked against one another. Per-cell AUCell scores (Fig 1a) are unaffected. Set to 0 to disable | 0.00 |
 | Figure width | Single column (89 mm) or double column (183 mm) | Single |
 
 ### Tabs
@@ -88,7 +89,7 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 |---|---|
 | **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, bacTRAP volcano plot, gene matching diagnostics |
 | **AUCell (Main Figure)** | Main **Figure 1a–c** (AUCell UMAP, cell-type UMAP with top-15 clusters highlighted, violin distributions) plus supplementary panels S2/S3/S11 (per-cluster barplot, global histogram, composite consensus ranking) |
-| **Cre-driver Check** | Sanity check: per-cluster expression of the Cre-driver gene (default `Pnoc`) across the top-ranked clusters from the composite consensus, with a configurable "fraction expressing" threshold to flag mapping hits that may reflect Cre lineage tracing rather than current expression |
+| **Cre-driver Check** | Sanity check + optional baseline filter. Per-cluster expression of the Cre-driver gene (default `Pnoc`) across the top-ranked clusters from the composite consensus, with a configurable "fraction expressing" threshold that highlights (but does not drop) suspicious hits. The sidebar's "Baseline Cre-driver mean expression" slider additionally enforces a minimum expression floor that feeds back into every cluster-level ranking (correlation, Fisher, NNLS, GSEA, composite, AUCell); filtered CSV exports are suffixed with the filter signature (e.g. `composite_ranking_pnoc_ge0p05.csv`) |
 | **Correlation (Suppl.)** | Ranked cluster table + correlation barplot (Supplementary Figure S1) |
 | **UMAP Projection (Suppl.)** | Two-panel UMAP: cell-type annotation + AUCell score, side-by-side (Supplementary Figure S4) |
 | **Marker Overlap (Suppl.)** | Fisher's test table + Fisher volcano plot + dot plot (Supplementary Figures S5, S6) |
@@ -162,11 +163,15 @@ Per-cell enrichment of the bacTRAP signature, computed with a faithful Python im
 - **Cluster-level summaries and significance** — the per-cluster table (`aucell_per_cluster.csv`) contains mean, median, SD, SEM, and a one-sided Welch's *t*-test of "cluster > rest-of-atlas" with Benjamini–Hochberg *q*-values. Clusters with fewer than 20 cells are excluded from all top-N figure rankings (configurable via the "Min cells for AUCell top-N ranking" slider) because very small clusters' means are dominated by shrinkage variance; the raw CSV is unaffected and still contains every cluster.
 - **Output** — per-cell AUCell scores projected onto the HypoMap UMAP (Figure 1a), the same UMAP with the 15 highest-mean eligible clusters highlighted by cell type (Figure 1b), and violin distributions for those same 15 clusters (Figure 1c). Supplementary panels S2 (barplot), S3 (histogram) and S4 (paired UMAP) expose additional views.
 
-### 9. Cre-driver Expression Check
+### 9. Cre-driver Expression Check and Baseline Filter
 
-- Orthogonal sanity check against the composite consensus: reports per-cluster mean expression and fraction expressing for the Cre-driver gene itself (default `Pnoc`; configurable).
-- Flags clusters that rank highly in the bacTRAP mapping but show low current expression of the Cre driver — these hits may reflect Cre lineage tracing rather than ongoing transcription.
-- Output: barplot of fraction-expressing per cluster with the user-defined threshold marked.
+Two related knobs that share the Cre-driver gene set via the sidebar:
+
+- **Diagnostic (always active).** Reports per-cluster log-normalised mean expression and fraction expressing for the Cre-driver gene itself (default `Pnoc`; configurable). Clusters in the composite-consensus top-N that fall below the fraction threshold are highlighted in the sanity table so the user can spot hits that may reflect Cre lineage tracing or snRNA-seq dropout rather than ongoing transcription. This highlighting does *not* change any ranking.
+- **Baseline filter (optional).** The **Baseline Cre-driver mean expression** slider applies a minimum mean-expression floor. When set above 0, clusters below the floor are dropped *before* percentile conversion in Spearman correlation, Fisher's exact, NNLS, GSEA, and the composite consensus vote — so the surviving clusters re-rank against each other rather than inheriting their global positions. The AUCell cluster rankings (Fig 1b / S2 / 1c) and `aucell_per_cluster.csv` are filtered the same way. Per-cell AUCell scores, the per-cell UMAP (Fig 1a), and `aucell_per_cell.csv` are intentionally left unfiltered because they carry no cluster identity.
+- **Edge cases:** if the Cre-driver gene is absent from the atlas, or the threshold discards every cluster, the filter is disabled and a persistent warning/error banner is rendered above the tab group; all tabs revert to unfiltered behaviour and CSV filenames are the default.
+- **Filenames of filtered exports** are suffixed with the filter signature (e.g. `correlation_results_pnoc_ge0p05.csv`) so a collaborator opening a trimmed table from the Export tab can tell at a glance that it's a subset, not the full atlas.
+- **Output:** diagnostic barplot of fraction-expressing per cluster with the user-defined threshold marked, plus a per-cluster sanity table and CSV; when the baseline filter is active, every ranking-related tab acts on the restricted cluster universe.
 
 ---
 
@@ -193,28 +198,28 @@ All figures follow Nature journal specifications:
 
 **Main Figure 1 — AUCell maps the bacTRAP signature onto the HypoMap atlas.** Three panels, all derived from the same per-cell AUCell score (rank-based, normalisation-insensitive, threshold-free — the primary mapping method):
 
-| Panel | Type | Description |
-|---|---|---|
-| **1a** | UMAP | AUCell enrichment score projected onto the HypoMap UMAP (magma colormap, 2nd/98th-percentile clip, bottom-left axis arrows) |
-| **1b** | UMAP | Same UMAP layout coloured by cell-type annotation, with the **top-15 AUCell-ranked clusters** (≥ 20 cells) highlighted over a grey "Other" background |
-| **1c** | Violin plots | Per-cluster AUCell distributions for the same top-15 clusters, ordered by cluster mean (top = highest) |
+| Panel | Type | Description | Responds to baseline filter? |
+|---|---|---|---|
+| **1a** | UMAP | AUCell enrichment score projected onto the HypoMap UMAP (magma colormap, 2nd/98th-percentile clip, bottom-left axis arrows) | No (per-cell) |
+| **1b** | UMAP | Same UMAP layout coloured by cell-type annotation, with the **top-15 AUCell-ranked clusters** (≥ 20 cells, passing the baseline filter when active) highlighted over a grey "Other" background | Yes |
+| **1c** | Violin plots | Per-cluster AUCell distributions for the same top-15 clusters, ordered by cluster mean (top = highest) | Yes |
 
-**Supplementary Figures** — complementary analyses and AUCell diagnostics:
+**Supplementary Figures** — complementary analyses and AUCell diagnostics. Cluster-level panels (S1, S2, S5–S8, S10, S11) honour the optional baseline Cre-driver expression filter and recompute their rankings over the surviving clusters when the slider is > 0; per-cell panels (S3, S4, Fig 1a) do not carry cluster identity and are unaffected.
 
-| Figure | Type | Description |
-|---|---|---|
-| **Volcano** (Data Overview) | Scatter plot | bacTRAP gene-level volcano (log₂FC vs −log₁₀ padj), with Pnoc and top enriched genes labelled |
-| **S1** | Horizontal barplot | Top 20 clusters by Spearman correlation, coloured by ρ; hatched bars mark non-significant pairs |
-| **S2** | Horizontal barplot | Mean AUCell score per cluster (top 25, ≥ 20 cells), SEM error bars, magma colormap |
-| **S3** | Histogram | Global AUCell score distribution with 90/95/99th-percentile markers |
-| **S4** | Two-panel UMAP | Cell-type annotation (left) and per-cell AUCell score (right), paired for side-by-side comparison |
-| **S5** | Volcano plot | log₂(odds ratio) vs −log₁₀(*p*) from Fisher's marker-overlap test, top hits labelled |
-| **S6** | Dot plot | Top enriched genes vs correlation-ranked clusters (size = % expressing, colour = mean expression) |
-| **S7** | Heatmap | Z-scored expression of top genes across top clusters (Ward's-linkage row clustering, diverging RdBu_r) |
-| **S8** | Horizontal barplot | NNLS deconvolution weights per cluster (magma colormap) |
-| **S9** | Line plot | Running GSEA enrichment curves for top 5 clusters (legend right of plot) |
-| **S10** | Horizontal barplot | GSEA normalised enrichment scores (NES), significance coloured |
-| **S11** | Heatmap | Composite consensus ranking across correlation, Fisher, NNLS and GSEA (percentile averages, YlOrRd) |
+| Figure | Type | Description | Baseline filter |
+|---|---|---|---|
+| **Volcano** (Data Overview) | Scatter plot | bacTRAP gene-level volcano (log₂FC vs −log₁₀ padj), with Pnoc and top enriched genes labelled | No (gene-level) |
+| **S1** | Horizontal barplot | Top 20 clusters by Spearman correlation, coloured by ρ; hatched bars mark non-significant pairs | Yes |
+| **S2** | Horizontal barplot | Mean AUCell score per cluster (top 25, ≥ 20 cells), SEM error bars, magma colormap | Yes |
+| **S3** | Histogram | Global AUCell score distribution with 90/95/99th-percentile markers | No (per-cell) |
+| **S4** | Two-panel UMAP | Cell-type annotation (left) and per-cell AUCell score (right), paired for side-by-side comparison | No (per-cell) |
+| **S5** | Volcano plot | log₂(odds ratio) vs −log₁₀(*p*) from Fisher's marker-overlap test, top hits labelled | Yes |
+| **S6** | Dot plot | Top enriched genes vs correlation-ranked clusters (size = % expressing, colour = mean expression) | Yes |
+| **S7** | Heatmap | Z-scored expression of top genes across top clusters (Ward's-linkage row clustering, diverging RdBu_r). *z*-scoring is recomputed against the filtered cluster universe so the displayed scores stay internally consistent | Yes |
+| **S8** | Horizontal barplot | NNLS deconvolution weights per cluster (magma colormap) | Yes |
+| **S9** | Line plot | Running GSEA enrichment curves for top 5 clusters (legend right of plot) | Yes (curves drawn for filtered top-5) |
+| **S10** | Horizontal barplot | GSEA normalised enrichment scores (NES), significance coloured | Yes |
+| **S11** | Heatmap | Composite consensus ranking across correlation, Fisher, NNLS and GSEA (percentile averages, YlOrRd); percentiles re-computed against the filtered universe | Yes |
 
 ---
 

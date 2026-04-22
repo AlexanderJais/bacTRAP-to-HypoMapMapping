@@ -1327,19 +1327,24 @@ if run_button or st.session_state.analysis_done:
 
         # Figure 1b: Cell-type annotation UMAP (top-15 AUCell clusters)
         st.subheader("Figure 1b: Cell-type Annotation UMAP (top-15 AUCell clusters)")
+        _filter_clause_1b = (
+            f" and passing the baseline {sanity_gene} filter "
+            f"(mean ≥ {sanity_baseline_mean_expr:.2f})"
+            if baseline_allowed is not None else ""
+        )
         st.markdown(
             f"**Figure 1b.** Same UMAP layout as (a), coloured by HypoMap "
             f"cell-type annotation (`{annotation_col}`). Only the 15 "
             f"clusters with the highest mean AUCell score (among clusters "
-            f"with ≥ **{min_cells_for_rank}** cells) are drawn in colour "
-            f"and overplotted on a light-grey background of all remaining "
-            f"cells; this keeps small but highly enriched populations "
-            f"visible while conveying overall atlas topology. The legend "
-            f"lists the highlighted clusters in rank order (top entry = "
-            f"highest mean AUCell). The 20-cell floor excludes small "
-            f"populations whose cluster mean is dominated by shrinkage "
-            f"variance and would otherwise claim top slots by chance — "
-            f"they remain in `aucell_per_cluster.csv`."
+            f"with ≥ **{min_cells_for_rank}** cells{_filter_clause_1b}) "
+            f"are drawn in colour and overplotted on a light-grey "
+            f"background of all remaining cells; this keeps small but "
+            f"highly enriched populations visible while conveying overall "
+            f"atlas topology. The legend lists the highlighted clusters "
+            f"in rank order (top entry = highest mean AUCell). The 20-cell "
+            f"floor excludes small populations whose cluster mean is "
+            f"dominated by shrinkage variance and would otherwise claim "
+            f"top slots by chance — they remain in `aucell_per_cluster.csv`."
         )
         _size_filtered_ranked = (
             aucell_per_cluster_df[
@@ -1393,13 +1398,18 @@ if run_button or st.session_state.analysis_done:
 
         # Supplementary S2: AUCell Cluster Barplot (was Figure 1b)
         st.subheader("Supplementary Figure S2: Mean AUCell Score per Cluster")
+        _filter_clause_s2 = (
+            f" and also filtered to clusters with mean {sanity_gene} ≥ "
+            f"{sanity_baseline_mean_expr:.2f}"
+            if baseline_allowed is not None else ""
+        )
         st.markdown(
             f"**Supplementary Figure S2.** Horizontal barplot of mean AUCell "
             f"score per HypoMap cluster (top 25 by mean, clusters with "
-            f"< **{min_cells_for_rank}** cells excluded from ranking). "
-            f"Error bars are standard error of the mean. Bar colour "
-            f"encodes the cluster mean (magma colormap). Source table: "
-            f"`aucell_per_cluster.csv`."
+            f"< **{min_cells_for_rank}** cells excluded from ranking"
+            f"{_filter_clause_s2}). Error bars are standard error of the "
+            f"mean. Bar colour encodes the cluster mean (magma colormap). "
+            f"Source table: `aucell_per_cluster.csv`."
         )
         fig_1b = figure_aucell_cluster_barplot(
             aucell_scores, cell_labels,
@@ -1441,6 +1451,11 @@ if run_button or st.session_state.analysis_done:
 
         # Figure 1c: AUCell Violin Plots
         st.subheader("Figure 1c: AUCell Score Distributions (Top-15 Clusters)")
+        _filter_clause_1c = (
+            f" Top-15 is taken over clusters with mean {sanity_gene} ≥ "
+            f"{sanity_baseline_mean_expr:.2f}."
+            if baseline_allowed is not None else ""
+        )
         st.markdown(
             f"**Figure 1c.** Violin plots of the full AUCell score "
             f"distribution within each of the 15 top-ranked clusters from "
@@ -1453,7 +1468,7 @@ if run_button or st.session_state.analysis_done:
             f"colour encodes the cluster mean (magma colormap). "
             f"Per-cluster means, medians, SEMs and Welch's one-sided "
             f"*t*-test *p*/*q*-values against the rest of the atlas are "
-            f"available in `aucell_per_cluster.csv`."
+            f"available in `aucell_per_cluster.csv`.{_filter_clause_1c}"
         )
         fig_1c = figure_aucell_violins(
             aucell_scores, cell_labels,
@@ -1995,6 +2010,14 @@ if run_button or st.session_state.analysis_done:
         st.markdown(
             "Z-scored mean expression of top bacTRAP-enriched genes across "
             "the highest-correlating HypoMap clusters."
+            + (
+                f" When the baseline {sanity_gene} filter is active, the "
+                f"cluster columns and the *z*-scoring reference are "
+                f"recomputed against the filtered cluster set so the "
+                f"displayed *z*-scores stay internally consistent with "
+                f"the shown cluster panel."
+                if baseline_allowed is not None else ""
+            )
         )
 
         if not zscore_df.empty:
