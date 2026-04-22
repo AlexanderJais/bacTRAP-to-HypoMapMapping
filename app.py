@@ -539,6 +539,31 @@ if run_button or st.session_state.analysis_done:
     _need_recompute = run_button or _cached is None or _cached.get("params") != _analysis_params
 
     if _need_recompute:
+        # ---- Log user inputs (record-keeping) ----
+        logger.info("-" * 60)
+        logger.info("User inputs for this run:")
+        logger.info("  bacTRAP file: %s", bactrap_file.strip())
+        logger.info("  HypoMap file: %s", hypomap_file.strip())
+        logger.info("  gene column: %s", _gene_col_for_matching)
+        logger.info("  annotation column: %s", annotation_col)
+        logger.info("  padj cutoff: %.3f", padj_cutoff)
+        logger.info("  log2FC cutoff: %.2f", log2fc_cutoff)
+        logger.info("  min IP expression: %.1f", min_ip_expression)
+        logger.info("  ranking metric: %s", ranking_metric)
+        logger.info("  top N genes: %d", top_n_genes)
+        logger.info("  AUCell top fraction: %.2f", aucell_top_fraction)
+        logger.info("  marker genes per cluster: %d", n_markers_per_cluster)
+        logger.info("  min cells per cluster (markers): %d", min_cells_per_cluster)
+        logger.info("  min cells for AUCell top-N ranking: %d", min_cells_for_rank)
+        logger.info("  marker method: %s", marker_method)
+        logger.info("  UMAP subsample: %d", umap_subsample)
+        logger.info("  hide Unassigned/Mixed: %s", hide_unassigned)
+        logger.info("  Cre-driver gene: %s", sanity_gene)
+        logger.info("  Cre-driver expression fraction threshold: %.2f", sanity_fraction_threshold)
+        logger.info("  Cre-driver baseline mean expression (log-norm): %.2f", sanity_baseline_mean_expr)
+        logger.info("  figure width mode: %s", fig_width_mode)
+        logger.info("-" * 60)
+
         # ---- Gene matching ----
         progress = progress_placeholder.progress(0, text="Matching genes...")
 
