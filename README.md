@@ -293,6 +293,7 @@ bacTRAP-to-HypoMapMapping/
 
 The application writes a detailed log to `bactrap_hypomap.log` in the app directory. The log captures:
 
+- User inputs: every sidebar parameter (cutoffs, thresholds, ranking metric, Cre-driver settings, figure width, etc.) is logged once per analysis run for reproducibility
 - HypoMap structure: var_names, raw.var_names, all column names, sample values
 - bacTRAP structure: all columns, dtypes, sample values from every string column
 - Gene name resolution: Ensembl detection, symbol column search, fallback attempts

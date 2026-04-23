@@ -9,6 +9,7 @@ Run with: streamlit run app.py
 
 import io
 import logging
+import re
 import zipfile
 
 import streamlit as st
@@ -170,8 +171,8 @@ min_cells_for_rank = st.sidebar.slider(
     help=(
         "Clusters with fewer than this many cells are excluded from the "
         "top-ranked set shown in main figures 1b/1c and supplementary S2. "
-        "Mean AUCell for "
-        "very small clusters is dominated by shrinkage variance, so a "
+        "Mean AUCell for very small clusters is dominated by shrinkage "
+        "variance, so a "
         "2-cell cluster with a slightly above-average mean can otherwise "
         "claim a top slot purely by chance (fix #4 from the critical "
         "evaluation). Raw per-cluster CSV is unaffected and still contains "
@@ -1006,8 +1007,7 @@ if run_button or st.session_state.analysis_done:
     # only changes what the tabs display.
     _display_filter_active = hide_unassigned or baseline_allowed is not None
     if _display_filter_active:
-        import re as _re
-        _excl_pat = _re.compile(r"Unassigned|Mixed", _re.IGNORECASE)
+        _excl_pat = re.compile(r"Unassigned|Mixed", re.IGNORECASE)
 
         def _filter_by_cluster(df, col="cluster"):
             if df is None or len(df) == 0 or col not in df.columns:
