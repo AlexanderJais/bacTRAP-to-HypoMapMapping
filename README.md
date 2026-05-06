@@ -112,18 +112,20 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 
 ### 2. Enrichment Correlation
 
-- Computes mean expression per cluster in HypoMap for all overlapping genes.
-- Filters NaN values from the enrichment vector before computing correlations.
-- Correlates each cluster's expression profile against the bacTRAP `log2FoldChange` vector using both Pearson and Spearman correlation.
-- Output: clusters ranked by Spearman rho, with r-values and p-values.
+- Per-cell counts are size-normalised (`normalize_total`, target 1×10⁴) and log1p-transformed before averaging within each cluster, so high-depth non-neuronal clusters cannot dominate via library size.
+- The cluster-mean matrix is row-wise z-scored across clusters per gene, converting "how highly expressed" into "how cluster-specific" — the same kind of deviation quantity log₂FC measures on the bacTRAP side. Genes with zero cross-cluster variance are dropped.
+- NaN enrichment values are removed before correlation; a minimum of three informative genes is required.
+- Pearson and Spearman correlation are computed per cluster; per-cluster *p*-values are FDR-corrected (Benjamini–Hochberg) and a `both_significant` flag marks clusters passing the dual test under FDR < 0.05.
+- Output: clusters ranked by Spearman *ρ*, with *r*-values, raw and FDR-adjusted *p*-values.
 
 ### 3. Marker Gene Overlap (Fisher's Exact Test)
 
-- Defines "enriched genes" as those passing both the padj and log2FC cutoffs.
-- Computes marker genes per cluster via `scanpy.tl.rank_genes_groups` (Wilcoxon test), or loads pre-computed markers from `.uns['rank_genes_groups']` if available and matching the selected annotation column.
+- Defines "enriched genes" as those passing the padj, log₂FC and (optional) min-IP-expression cutoffs.
+- Computes marker genes per cluster via `scanpy.tl.rank_genes_groups` (Wilcoxon by default; `t-test_overestim_var` available for ~10× faster runs), or loads pre-computed markers from `.uns['rank_genes_groups']` if available and matching the selected annotation column.
 - Marker gene names are converted from Ensembl IDs to gene symbols when raw data uses Ensembl notation.
-- Tests overlap using a one-sided Fisher's exact test per cluster, with Benjamini-Hochberg FDR correction.
-- Output: clusters ranked by enrichment p-value, with odds ratios, overlap counts, and overlapping gene names.
+- Reference universe is the bacTRAP-matched gene set; both the enriched gene list and each cluster's markers are intersected with that universe before the 2×2 contingency table is built, so markers that fall outside the bacTRAP DE table cannot push the marker count above the universe and break the test.
+- Tests overlap using a one-sided Fisher's exact test per cluster, with Benjamini–Hochberg FDR correction. Clusters whose contingency "neither" cell would be < 5 are reported as NaN to drop out of FDR/ranking rather than topping the list with a sentinel odds ratio.
+- Output: clusters ranked by enrichment *p*-value, with odds ratios, overlap counts, and the actual overlapping gene names.
 
 ### 4. UMAP Enrichment Projection
 
@@ -138,18 +140,19 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 
 ### 6. NNLS Deconvolution
 
-- Non-Negative Least Squares: finds non-negative cluster weights **w** that minimize `||A @ w - b||` where **A** is the cluster mean expression matrix and **b** is the bacTRAP log2FC vector.
-- Produces quantitative contribution weights per cell type, answering not just *which* clusters match but *how much* each contributes to the enrichment profile.
-- Output: clusters ranked by normalized weight.
+- Builds a cluster-specificity matrix **A** by row-wise z-scoring the (already log-normalised) cluster-mean matrix per gene, so each row encodes how many standard deviations each cluster sits from the gene's across-cluster mean. Genes with zero cross-cluster variance are dropped.
+- Centres the bacTRAP log₂FC vector **b** at its mean so the optimiser fits relative enrichment rather than the global positive offset (otherwise NNLS would absorb the offset by spreading weight across many clusters).
+- Solves `min ||A @ w − b||₂` subject to **w** ≥ 0 with `scipy.optimize.nnls`.
+- Output: clusters ranked by raw weight, with sum-to-1 normalised weights and the residual norm `||A @ w − b||₂` repeated on every row for downstream pipelines.
 
 ### 7. GSEA Preranked Enrichment
 
-- Ranks all matched genes by bacTRAP log2FC (no hard cutoff).
-- For each cluster's marker gene set, computes a running enrichment score (Subramanian et al., PNAS 2005).
-- Significance assessed via 1,000 permutations (gene labels and enrichment values permuted in sync), with FDR correction.
-- Normalized Enrichment Score (NES) enables cross-cluster comparison.
+- Ranks all matched genes by bacTRAP log₂FC in descending order (no hard cutoff).
+- For each cluster's marker gene set, computes a weighted running enrichment score (Subramanian et al., PNAS 2005); the peak with the larger absolute magnitude (positive or negative) is retained as the cluster ES.
+- Significance is assessed via 1,000 permutations (gene labels and enrichment values permuted in sync to preserve the rank–value structure), with Benjamini–Hochberg FDR correction across clusters.
+- NES uses sign-split normalisation (Subramanian et al., 2005): positive ESs are divided by the mean of the positive null and negative ESs by the absolute mean of the negative null. When the same-sign null is empty, NES is reported as NaN and the cluster is sorted to the end of the table rather than collapsed to zero.
 - More powerful than Fisher's binary test because it uses the full ranking.
-- Output: clusters ranked by NES, with ES, p-values, and FDR-adjusted p-values.
+- Output: clusters ranked by NES, with ES, raw *p*-values, FDR-adjusted *p*-values, and the per-cluster hit count.
 
 ### 8. AUCell Scoring
 
@@ -257,12 +260,12 @@ bacTRAP-to-HypoMapMapping/
 - `rank_enriched_genes()` -- rank enriched genes by π-score (default), log₂FC, or -log₁₀(padj)
 - `compute_marker_genes()` -- Wilcoxon-based marker detection via scanpy (Ensembl-to-symbol conversion)
 - `load_precomputed_markers()` -- attempts to read `.uns['rank_genes_groups']`
-- `fisher_overlap_test()` -- one-sided Fisher's exact test with FDR correction
+- `fisher_overlap_test()` -- one-sided Fisher's exact test with FDR correction; accepts an explicit `gene_universe` so cluster markers and the enriched-gene list are intersected with the bacTRAP-matched set before the contingency table is built
 - `compute_zscore_heatmap_data()` -- z-scored expression matrix for heatmaps
 - `compute_nnls_deconvolution()` -- non-negative least squares decomposition
 - `compute_gsea_enrichment()` -- preranked GSEA with permutation-based p-values
 - `validate_aucell_input()` -- sanity-checks the AUCell input layer (raw counts, integer-ness, max value) and returns a machine-readable QC report
-- `compute_aucell_scores()` -- rank-based AUCell scoring with per-cell random-jitter tie-breaking (Aibar 2017); optional `info_out` dict returns match rate, `n_top` and top-fraction-bump diagnostics
+- `compute_aucell_scores()` -- rank-based AUCell scoring with per-cell random-jitter tie-breaking (Aibar 2017); accepts an optional `prebuilt_lookup` to skip rebuilding the atlas gene-name index; optional `info_out` dict returns match rate, `n_top`, top-fraction-bump diagnostics, the source layer (`raw`/`X`) and the requested-vs-effective top-fraction
 - `compute_cluster_enrichment_stats()` -- per-cluster Welch's one-sided *t*-test vs. rest of atlas, with Benjamini–Hochberg *q*-values
 - `compute_composite_ranking()` -- percentile-averaged consensus across all methods
 
