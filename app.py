@@ -683,8 +683,16 @@ if run_button or st.session_state.analysis_done:
             }
         progress.progress(45, text="Running Fisher's exact test...")
 
+        # Universe = bacTRAP-matched atlas genes. Pass the explicit set so
+        # cluster markers (drawn from the full atlas) are intersected with
+        # it before the 2×2 contingency table is built — otherwise
+        # n_markers can exceed universe_size and the "neither" cell goes
+        # negative, breaking Fisher's exact (audit fix #3).
         universe_size = len(matched_genes)
-        fisher_df = fisher_overlap_test(enriched_genes_list, markers, universe_size)
+        fisher_df = fisher_overlap_test(
+            enriched_genes_list, markers, universe_size,
+            gene_universe=matched_genes,
+        )
         progress.progress(50, text="Computing UMAP enrichment scores...")
 
         # ---- UMAP enrichment score ----
@@ -775,6 +783,7 @@ if run_button or st.session_state.analysis_done:
         aucell_scores = compute_aucell_scores(
             adata, top_enriched_genes, top_fraction=aucell_top_fraction,
             info_out=aucell_run_info,
+            prebuilt_lookup=(_adata_lookup, _adata_gnames, _adata_has_raw),
         )
 
         # Merge scoring diagnostics into the QC report so the UI surfaces

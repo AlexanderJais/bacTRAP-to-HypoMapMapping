@@ -529,6 +529,13 @@ def figure_volcano_enrichment(
     """
     Volcano-style plot: x = log2(odds ratio), y = -log10(p-value).
     Label top hits.
+
+    Significance is decided on the BH-adjusted p-value (``padj``) when
+    that column is present — the caller passes its FDR threshold
+    (``padj_cutoff``) and reading it against the raw ``pvalue`` would
+    over-flag points (audit fix #4). The y-axis still plots
+    ``-log10(pvalue)`` for spread; the colouring and dashed threshold
+    line reflect the FDR call.
     """
     setup_nature_style()
     width = get_figure_width(double_column)
@@ -546,7 +553,8 @@ def figure_volcano_enrichment(
     df["log2_odds_ratio"] = df["log2_odds_ratio"].clip(-10, 10)
     df["neg_log10_pval"] = df["neg_log10_pval"].clip(0, 50)
 
-    sig_mask = df["pvalue"] < pval_threshold
+    sig_col = "padj" if "padj" in df.columns else "pvalue"
+    sig_mask = df[sig_col] < pval_threshold
     nonsig = df[~sig_mask]
     sig = df[sig_mask]
 
@@ -558,18 +566,31 @@ def figure_volcano_enrichment(
     )
 
     # Significant points
+    sig_label = (
+        f"FDR < {pval_threshold}" if sig_col == "padj"
+        else f"p < {pval_threshold}"
+    )
     ax.scatter(
         sig["log2_odds_ratio"], sig["neg_log10_pval"],
         c="#d62728", s=20, alpha=0.8, edgecolors="none",
-        label=f"p < {pval_threshold}",
+        label=sig_label,
     )
 
-    # Significance threshold line
-    thresh_y = -np.log10(pval_threshold)
+    # Significance threshold line — drawn at the −log10 of the largest raw
+    # pvalue among padj-significant points so the dashed line still
+    # delimits the coloured cluster on the plotted y-axis. Falls back to
+    # −log10(pval_threshold) when nothing passes.
+    if sig_col == "padj" and sig_mask.any():
+        min_sig_p = float(sig["pvalue"].max())
+        thresh_y = -np.log10(max(min_sig_p, 1e-300))
+        thresh_text = f"FDR = {pval_threshold}"
+    else:
+        thresh_y = -np.log10(pval_threshold)
+        thresh_text = f"{sig_col} = {pval_threshold}"
     ax.axhline(y=thresh_y, color="black", linestyle="--", linewidth=0.5, alpha=0.5)
     ax.text(
         ax.get_xlim()[1] * 0.95, thresh_y + 0.3,
-        f"p = {pval_threshold}", fontsize=5, ha="right", va="bottom",
+        thresh_text, fontsize=5, ha="right", va="bottom",
     )
 
     # Label top hits
@@ -1293,8 +1314,6 @@ def figure_aucell_histogram(
     width = get_figure_width(double_column)
     fig, ax = plt.subplots(figsize=(width, width * 0.6))
 
-    # Remove zero scores for cleaner visualization
-    nonzero = aucell_scores[aucell_scores > 0]
     all_scores = aucell_scores
 
     ax.hist(all_scores, bins=100, color="steelblue", edgecolor="none",

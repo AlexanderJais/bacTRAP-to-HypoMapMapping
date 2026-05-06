@@ -449,6 +449,7 @@ def fisher_overlap_test(
     enriched_genes: List[str],
     cluster_markers: Dict[str, List[str]],
     universe_size: int,
+    gene_universe: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     """
     For each cluster, compute overlap between bacTRAP enriched genes
@@ -458,11 +459,33 @@ def fisher_overlap_test(
         enriched_genes: list of bacTRAP-enriched gene names
         cluster_markers: dict of cluster -> marker gene list
         universe_size: total number of genes in the overlap universe
+        gene_universe: optional explicit set of gene names defining the
+            universe. When supplied, ``enriched_genes`` and each cluster's
+            markers are intersected with it before the contingency table is
+            constructed, so genes that fall outside the bacTRAP-matched set
+            (markers can include atlas genes that are not in the bacTRAP DE
+            table) cannot inflate ``n_markers`` past ``universe_size`` —
+            which would otherwise make the ``d`` cell of the 2×2 table
+            negative and the test meaningless. ``universe_size`` is also
+            overridden by ``len(gene_universe)`` when both are given.
 
     Returns:
         DataFrame with columns: cluster, overlap_count, overlap_genes,
         odds_ratio, pvalue, neg_log10_pval, sorted by pvalue.
     """
+    if gene_universe is not None:
+        universe_set = {str(g).lower() for g in gene_universe}
+        universe_size = len(universe_set)
+        n_before = len(enriched_genes)
+        enriched_genes = [g for g in enriched_genes if str(g).lower() in universe_set]
+        if len(enriched_genes) != n_before:
+            logger.info(
+                "fisher_overlap_test: dropped %d/%d enriched genes outside "
+                "the supplied universe", n_before - len(enriched_genes), n_before,
+            )
+    else:
+        universe_set = None
+
     logger.info("fisher_overlap_test: %d enriched genes, %d clusters, universe=%d",
                 len(enriched_genes), len(cluster_markers), universe_size)
     if len(enriched_genes) == 0 or len(cluster_markers) == 0:
@@ -481,6 +504,8 @@ def fisher_overlap_test(
     results = []
     for cluster, markers in cluster_markers.items():
         marker_set = set(g.lower() for g in markers)
+        if universe_set is not None:
+            marker_set &= universe_set
         n_markers = len(marker_set)
 
         overlap = enriched_set & marker_set
@@ -923,6 +948,7 @@ def compute_aucell_scores(
     top_fraction: float = 0.05,
     seed: int = 0,
     info_out: Optional[Dict] = None,
+    prebuilt_lookup: Optional[Tuple[Dict[str, Tuple[str, int]], np.ndarray, bool]] = None,
 ) -> np.ndarray:
     """
     Compute AUCell scores for each cell.
@@ -963,10 +989,15 @@ def compute_aucell_scores(
     # both symbols and Ensembl IDs, matching the lookup used everywhere else
     # in the pipeline (fix #5: previously this function used a simpler
     # lowercase-only lookup that silently dropped genes when the matrix
-    # layer used a different namespace than the signature).
-    lookup, source_gene_names, is_raw_lookup = _build_adata_gene_lookup(
-        adata, use_raw=use_raw,
-    )
+    # layer used a different namespace than the signature). Callers can
+    # pass a ``prebuilt_lookup`` (the same tuple ``_build_adata_gene_lookup``
+    # returns) to avoid rebuilding it.
+    if prebuilt_lookup is not None:
+        lookup, source_gene_names, is_raw_lookup = prebuilt_lookup
+    else:
+        lookup, source_gene_names, is_raw_lookup = _build_adata_gene_lookup(
+            adata, use_raw=use_raw,
+        )
     if is_raw_lookup and adata.raw is not None:
         X = adata.raw.X
     else:
@@ -1002,10 +1033,13 @@ def compute_aucell_scores(
         if info_out is not None:
             info_out.update({
                 "n_query_matched": 0,
-                "unmatched": unmatched,
+                "n_query_requested": int(len(gene_names)),
+                "unmatched": list(unmatched),
                 "n_top": 0,
                 "n_top_bumped": False,
+                "requested_top_fraction": float(top_fraction),
                 "effective_top_fraction": 0.0,
+                "source_layer": "raw" if is_raw_lookup else "X",
             })
         return np.zeros(n_cells)
 
@@ -1050,7 +1084,12 @@ def compute_aucell_scores(
     # consumed a variable amount of state before the jitter draws, so
     # otherwise-identical signature runs on atlases with different
     # n_cells would produce different AUCell numbers at the same seed.
-    sampling_rng, jitter_rng = np.random.default_rng(seed).spawn(2)
+    # SeedSequence.spawn keeps the streams independent without requiring
+    # numpy >= 1.25 (BitGenerator.spawn).
+    _seed_seq = np.random.SeedSequence(seed)
+    sampling_seed, jitter_seed = _seed_seq.spawn(2)
+    sampling_rng = np.random.default_rng(sampling_seed)
+    jitter_rng = np.random.default_rng(jitter_seed)
 
     # Determine a safe jitter scale: must be smaller than the smallest gap
     # between distinct expression values, otherwise jitter could reorder
