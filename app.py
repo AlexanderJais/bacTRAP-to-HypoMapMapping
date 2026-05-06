@@ -333,8 +333,6 @@ from data_loading import (
     load_bactrap,
     get_annotation_columns,
     match_genes,
-    compute_cluster_mean_expression,
-    compute_fraction_expressing,
     compute_single_gene_cluster_stats,
     get_gene_names_from_adata,
     _detect_gene_column,
@@ -342,14 +340,10 @@ from data_loading import (
     _looks_like_ensembl,
 )
 from analysis import (
-    compute_enrichment_correlation,
     get_enriched_genes,
     rank_enriched_genes,
     compute_marker_genes,
     load_precomputed_markers,
-    fisher_overlap_test,
-    compute_zscore_heatmap_data,
-    compute_nnls_deconvolution,
     compute_gsea_enrichment,
     compute_aucell_scores,
     validate_aucell_input,
@@ -359,12 +353,7 @@ from analysis import (
 from figures import (
     setup_nature_style,
     figure_bactrap_volcano,
-    figure_correlation_barplot,
     figure_umap_enrichment,
-    figure_dotplot,
-    figure_volcano_enrichment,
-    figure_heatmap,
-    figure_nnls_barplot,
     figure_gsea_curves,
     figure_gsea_barplot,
     figure_aucell_umap,
@@ -509,15 +498,11 @@ if (
 # Progress bar placeholder — rendered above tabs so it's always visible
 progress_placeholder = st.empty()
 
-tab1, tab_aucell, tab_sanity, tab3, tab4, tab5, tab6, tab7, tab8, tab_export = st.tabs([
+tab1, tab_aucell, tab_sanity, tab4, tab8, tab_export = st.tabs([
     "📊 Data Overview",
     "⭐ AUCell (Main Figure)",
     "🔍 Cre-driver Check",
-    "📈 Correlation (Suppl.)",
     "🗺️ UMAP Projection (Suppl.)",
-    "🔬 Marker Overlap (Suppl.)",
-    "🔥 Heatmap (Suppl.)",
-    "⚖️ NNLS (Suppl.)",
     "📶 GSEA (Suppl.)",
     "📥 Export",
 ])
@@ -592,21 +577,8 @@ if run_button or st.session_state.analysis_done:
             )
             st.stop()
 
-        progress.progress(10, text="Genes matched. Computing cluster means...")
-
-        # ---- Cluster mean expression ----
-        # Explicit normalize=True: the raw layer holds counts, and downstream
-        # correlation / NNLS require log-normalized means in comparable space.
-        # Leaving it on auto is unsafe when the gene subset is sparse (the
-        # heuristic samples only the selected genes and can falsely decide
-        # the data is already normalized — see the second call below).
+        progress.progress(15, text="Genes matched. Identifying enriched genes...")
         gene_indices = [gene_to_idx[g] for g in matched_genes]
-        cluster_mean_expr = compute_cluster_mean_expression(
-            adata, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
-            indices_in_raw=matched_in_raw,
-            normalize=True,
-        )
-        progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
 
         # ---- Enriched genes ----
         # Pass the min-IP-expression filter through; it guards against the
@@ -624,13 +596,7 @@ if run_button or st.session_state.analysis_done:
         enriched_sorted = rank_enriched_genes(enriched_df, metric=ranking_metric)
         top_enriched_genes = enriched_sorted["_hypomap_gene_name"].tolist()[:top_n_genes]
 
-        progress.progress(30, text="Computing enrichment correlation...")
-
-        # ---- Correlation analysis ----
-        # Use only enriched genes (positive FC + significant padj) — negative FC
-        # genes are from non-target cell populations and would dilute the signal.
-        corr_df = compute_enrichment_correlation(enriched_df, cluster_mean_expr)
-        progress.progress(30, text="Computing marker gene overlap...")
+        progress.progress(30, text="Loading marker genes (for GSEA)...")
 
         # ---- Marker gene overlap ----
         # Markers only depend on the atlas file, annotation column, n_genes,
@@ -665,15 +631,10 @@ if run_button or st.session_state.analysis_done:
                             method=marker_method,
                         )
                     except Exception as e:
-                        # Common on pathologically small atlases or when
-                        # min_cells_per_cluster is too aggressive for the
-                        # selected annotation level. Fisher / GSEA / dotplot
-                        # will all degrade gracefully on an empty marker dict.
                         logger.exception("Marker gene computation failed")
                         st.warning(
                             f"Marker gene computation failed: {e}. "
-                            f"Fisher overlap, GSEA, dotplot and heatmap panels "
-                            f"will be unavailable. Try lowering "
+                            f"GSEA will be unavailable. Try lowering "
                             f"'Min cells per cluster (markers)' or selecting "
                             f"a coarser annotation level."
                         )
@@ -681,67 +642,13 @@ if run_button or st.session_state.analysis_done:
             st.session_state["_markers_cache"] = {
                 "params": _markers_params, "markers": markers,
             }
-        progress.progress(45, text="Running Fisher's exact test...")
 
-        universe_size = len(matched_genes)
-        fisher_df = fisher_overlap_test(enriched_genes_list, markers, universe_size)
-        progress.progress(50, text="Computing UMAP enrichment scores...")
-
-        # ---- UMAP enrichment score ----
         if len(top_enriched_genes) == 0:
             st.warning(
                 f"No genes pass enrichment thresholds (padj < {padj_cutoff}, "
                 f"log₂FC > {log2fc_cutoff}). AUCell and all downstream "
                 "scores will be zero — try relaxing the cutoffs."
             )
-        progress.progress(55, text="Preparing figures...")
-
-        # ---- Fraction expressing for dotplot ----
-        enriched_gene_indices = [gene_to_idx[g] for g in top_enriched_genes if g in gene_to_idx]
-        n_dropped = len(top_enriched_genes) - len(enriched_gene_indices)
-        if n_dropped > 0:
-            st.warning(f"{n_dropped} enriched gene(s) could not be mapped back to HypoMap indices and were excluded from the dot plot.")
-        # Prefer clusters significant by both Pearson and Spearman for downstream
-        # displays; fall back to all clusters if too few pass the dual filter.
-        if len(corr_df) > 0 and "both_significant" in corr_df.columns:
-            sig_clusters = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
-            top_clusters_corr = sig_clusters[:15] if len(sig_clusters) >= 5 else corr_df["cluster"].tolist()[:15]
-        else:
-            top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
-
-        frac_expr = compute_fraction_expressing(
-            adata, enriched_gene_indices, annotation_col,
-            min_cells=min_cells_per_cluster,
-            indices_in_raw=matched_in_raw,
-        )
-        # Explicit normalize=True — top_enriched_genes are typically sparse,
-        # cell-type-specific markers (e.g. neuropeptides), so the auto-detect
-        # heuristic sees a low sample max and skips normalisation, leaving
-        # the dotplot in raw-count space while correlation/NNLS use log-norm.
-        enriched_mean_expr = compute_cluster_mean_expression(
-            adata, enriched_gene_indices, annotation_col,
-            min_cells=min_cells_per_cluster,
-            indices_in_raw=matched_in_raw,
-            normalize=True,
-        )
-
-        # ---- Z-score heatmap data ----
-        if len(corr_df) > 0 and "both_significant" in corr_df.columns:
-            sig_clusters_hm = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
-            top_clusters_heatmap = sig_clusters_hm[:20] if len(sig_clusters_hm) >= 5 else corr_df["cluster"].tolist()[:20]
-        else:
-            top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
-        top_genes_heatmap = top_enriched_genes[:30]
-        zscore_df = compute_zscore_heatmap_data(
-            cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
-        )
-
-        progress.progress(60, text="Running NNLS deconvolution...")
-
-        # ---- NNLS deconvolution ----
-        # Use only enriched genes — negative FC genes from non-target populations
-        # would distort the deconvolution by fitting against unwanted signal.
-        nnls_df = compute_nnls_deconvolution(enriched_df, cluster_mean_expr)
 
         progress.progress(65, text="Running GSEA enrichment...")
 
@@ -848,11 +755,16 @@ if run_button or st.session_state.analysis_done:
                 on="cluster", how="left",
             )
 
-        progress.progress(85, text="Computing composite ranking...")
+        progress.progress(85, text="Computing composite ranking (AUCell + GSEA)...")
 
-        # ---- Composite ranking ----
+        # ---- Composite ranking — AUCell mean + GSEA NES only ----
+        # Pearson/Spearman correlation, Fisher overlap and NNLS
+        # deconvolution were dropped: they were noise-dominated on this
+        # data and gave ranks that disagreed with both biology and the
+        # AUCell / GSEA result. The SCORE is the mean of the two
+        # surviving methods' percentile ranks.
         composite_df = compute_composite_ranking(
-            corr_df, fisher_df, nnls_df,
+            aucell_per_cluster_df,
             gsea_df if len(gsea_df) > 0 else None,
         )
 
@@ -880,19 +792,10 @@ if run_button or st.session_state.analysis_done:
             "gene_to_idx": gene_to_idx,
             "matched_in_raw": matched_in_raw,
             "gene_indices": gene_indices,
-            "cluster_mean_expr": cluster_mean_expr,
             "enriched_df": enriched_df,
             "enriched_genes_list": enriched_genes_list,
             "top_enriched_genes": top_enriched_genes,
-            "corr_df": corr_df,
             "markers": markers,
-            "fisher_df": fisher_df,
-            "enriched_gene_indices": enriched_gene_indices,
-            "top_clusters_corr": top_clusters_corr,
-            "frac_expr": frac_expr,
-            "enriched_mean_expr": enriched_mean_expr,
-            "zscore_df": zscore_df,
-            "nnls_df": nnls_df,
             "gsea_df": gsea_df,
             "gsea_running_scores": gsea_running_scores,
             "gsea_ranked_genes": gsea_ranked_genes,
@@ -906,8 +809,6 @@ if run_button or st.session_state.analysis_done:
             "umap_coords": umap_coords,
             "cell_labels": cell_labels,
             "enriched_sorted": enriched_sorted,
-            "top_genes_heatmap": top_genes_heatmap,
-            "top_clusters_heatmap": top_clusters_heatmap,
         }
     else:
         # ---- Restore cached results (no recomputation needed) ----
@@ -917,19 +818,10 @@ if run_button or st.session_state.analysis_done:
         gene_to_idx = _c["gene_to_idx"]
         matched_in_raw = _c["matched_in_raw"]
         gene_indices = _c["gene_indices"]
-        cluster_mean_expr = _c["cluster_mean_expr"]
         enriched_df = _c["enriched_df"]
         enriched_genes_list = _c["enriched_genes_list"]
         top_enriched_genes = _c["top_enriched_genes"]
-        corr_df = _c["corr_df"]
         markers = _c["markers"]
-        fisher_df = _c["fisher_df"]
-        enriched_gene_indices = _c["enriched_gene_indices"]
-        top_clusters_corr = _c["top_clusters_corr"]
-        frac_expr = _c["frac_expr"]
-        enriched_mean_expr = _c["enriched_mean_expr"]
-        zscore_df = _c["zscore_df"]
-        nnls_df = _c["nnls_df"]
         gsea_df = _c["gsea_df"]
         gsea_running_scores = _c["gsea_running_scores"]
         gsea_ranked_genes = _c["gsea_ranked_genes"]
@@ -943,8 +835,6 @@ if run_button or st.session_state.analysis_done:
         umap_coords = _c["umap_coords"]
         cell_labels = _c["cell_labels"]
         enriched_sorted = _c["enriched_sorted"]
-        top_genes_heatmap = _c["top_genes_heatmap"]
-        top_clusters_heatmap = _c["top_clusters_heatmap"]
         progress_placeholder.empty()
 
     st.session_state.analysis_done = True
@@ -978,10 +868,10 @@ if run_button or st.session_state.analysis_done:
 
     # ---- Optional baseline Cre-driver expression filter ----
     # When the slider is > 0, drop clusters whose mean Cre-driver expression
-    # falls below the floor BEFORE re-running the composite vote so
-    # correlation / Fisher / NNLS / GSEA all exclude them and the survivors
-    # are re-ranked against each other.  Applied post-cache so toggling the
-    # slider doesn't invalidate the expensive parts of the analysis.
+    # falls below the floor BEFORE re-running the composite vote so AUCell
+    # and GSEA both exclude them and the survivors are re-ranked against
+    # each other. Applied post-cache so toggling the slider doesn't
+    # invalidate the expensive parts of the analysis.
     baseline_allowed = None
     baseline_filter_state = "disabled"  # "disabled" | "active" | "broken_missing_gene" | "broken_empty"
     if sanity_baseline_mean_expr > 0:
@@ -1019,43 +909,22 @@ if run_button or st.session_state.analysis_done:
                 mask &= df[col].astype(str).isin(baseline_allowed)
             return df[mask].reset_index(drop=True)
 
-        corr_df = _filter_by_cluster(corr_df)
-        fisher_df = _filter_by_cluster(fisher_df)
-        nnls_df = _filter_by_cluster(nnls_df)
         gsea_df = _filter_by_cluster(gsea_df)
 
         # When the baseline filter is active, re-run the composite vote on
-        # the survivors so their percentiles reflect the restricted universe
-        # (the user-requested behavior: "correlation/Fisher/NNLS/GSEA all
-        # exclude those clusters" before the consensus is formed).  For
-        # hide_unassigned alone, filtering the cached composite by cluster
-        # is equivalent and cheaper.
+        # the survivors so their percentiles reflect the restricted universe.
+        # For hide_unassigned alone, filtering the cached composite by
+        # cluster is equivalent and cheaper.
         if baseline_allowed is not None:
+            _filtered_aucell = aucell_per_cluster_df[
+                aucell_per_cluster_df["cluster"].astype(str).isin(baseline_allowed)
+            ].reset_index(drop=True)
             composite_df = compute_composite_ranking(
-                corr_df, fisher_df, nnls_df,
+                _filtered_aucell,
                 gsea_df if gsea_df is not None and len(gsea_df) > 0 else None,
             )
         else:
             composite_df = _filter_by_cluster(composite_df)
-
-        # Recompute selection lists that drive dotplot / heatmap cluster sets
-        # so they stay consistent with the filtered rankings.
-        if len(corr_df) > 0 and "both_significant" in corr_df.columns:
-            _sig = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
-            top_clusters_corr = _sig[:15] if len(_sig) >= 5 else corr_df["cluster"].tolist()[:15]
-            top_clusters_heatmap = _sig[:20] if len(_sig) >= 5 else corr_df["cluster"].tolist()[:20]
-        else:
-            top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
-            top_clusters_heatmap = corr_df["cluster"].tolist()[:20] if len(corr_df) > 0 else []
-
-        # zscore_df is (genes × clusters); when the filter is active the
-        # cached matrix still holds the original unfiltered top-20 columns,
-        # and the heatmap (Suppl. S5) + heatmap_zscores.csv would otherwise
-        # show clusters that fail the filter.  Recompute against the
-        # filtered top_clusters_heatmap and the full cluster_mean_expr.
-        zscore_df = compute_zscore_heatmap_data(
-            cluster_mean_expr, top_genes_heatmap, top_clusters_heatmap,
-        )
 
     # Apply the baseline filter to every AUCell output — the user's intent is
     # to remove Cre-driver-negative clusters from the AUCell analysis, so the
@@ -1505,15 +1374,11 @@ if run_button or st.session_state.analysis_done:
             f"**Figure 1c.** Violin plots of the full AUCell score "
             f"distribution within each of the 15 top-ranked clusters from "
             f"(b), ordered from highest (top) to lowest (bottom) cluster "
-            f"mean. The short **solid black** vertical bar inside each "
-            f"violin marks the cluster mean; the **dashed grey** bar marks "
-            f"the cluster median (the two nearly coincide when the "
-            f"distribution is symmetric, in which case they read as a "
-            f"single I-shape — see the on-figure legend). Violin fill "
-            f"colour encodes the cluster mean (magma colormap). "
-            f"Per-cluster means, medians, SEMs and Welch's one-sided "
-            f"*t*-test *p*/*q*-values against the rest of the atlas are "
-            f"available in `aucell_per_cluster.csv`.{_filter_clause_1c}"
+            f"mean. Violin fill colour encodes the cluster mean (magma "
+            f"colormap). Per-cluster means, medians, SEMs and Welch's "
+            f"one-sided *t*-test *p*/*q*-values against the rest of the "
+            f"atlas are available in `aucell_per_cluster.csv`."
+            f"{_filter_clause_1c}"
         )
         fig_1c = figure_aucell_violins(
             aucell_scores, cell_labels,
@@ -1603,18 +1468,17 @@ if run_button or st.session_state.analysis_done:
             )
         plt.close(fig_1d)
 
-        # Supplementary S11: Composite Consensus Ranking (was Figure 1e)
+        # Composite Consensus Ranking — AUCell + GSEA only
         st.markdown("---")
-        st.subheader("Supplementary Figure S11: Composite Consensus Ranking")
+        st.subheader("Figure 1e: Composite Score (AUCell + GSEA)")
         st.markdown(
-            "**Supplementary Figure S11.** Composite consensus ranking "
-            "across Spearman correlation, Fisher's exact marker overlap, "
-            "NNLS deconvolution, and preranked GSEA (top 20 clusters). "
-            "Each method's cluster scores are converted to percentile "
-            "ranks (0–1) and averaged (`nanmean`, so methods with missing "
-            "data for a given cluster are excluded rather than penalised "
-            "with zero). Validation panel — confirms the AUCell-ranked "
-            "clusters are also prioritised by orthogonal methods."
+            "**Figure 1e.** Composite SCORE for the top 20 clusters, "
+            "computed from the two trustworthy methods: per-cluster mean "
+            "AUCell and preranked GSEA NES. Each method's cluster scores "
+            "are converted to percentile ranks (0–1) and averaged "
+            "(`nanmean`). The other methods that were previously included "
+            "(Spearman correlation, Fisher overlap, NNLS deconvolution) "
+            "produced unreliable rankings and were dropped."
         )
         if len(composite_df) > 0:
             fig_1e = figure_composite_ranking(composite_df, top_n=20, double_column=True)
@@ -1680,10 +1544,13 @@ if run_button or st.session_state.analysis_done:
             )
             if len(composite_df) > 0:
                 ranked_clusters = composite_df["cluster"].astype(str).tolist()
-                rank_source = f"composite consensus{_filter_suffix}"
-            elif len(corr_df) > 0:
-                ranked_clusters = corr_df["cluster"].astype(str).tolist()
-                rank_source = f"Spearman correlation{_filter_suffix}"
+                rank_source = f"composite consensus (AUCell + GSEA){_filter_suffix}"
+            elif aucell_per_cluster_df is not None and len(aucell_per_cluster_df) > 0:
+                ranked_clusters = (
+                    aucell_per_cluster_df.sort_values("mean", ascending=False)
+                    ["cluster"].astype(str).tolist()
+                )
+                rank_source = f"AUCell mean{_filter_suffix}"
             else:
                 ranked_clusters = sanity_stats.sort_values(
                     "mean_expr", ascending=False,
@@ -1824,85 +1691,6 @@ if run_button or st.session_state.analysis_done:
             )
 
     # ======================================================================
-    # TAB 3: Correlation Analysis (Supplementary)
-    # ======================================================================
-    with tab3:
-        st.header("Supplementary: Enrichment Correlation Analysis")
-        st.markdown(
-            "Pearson and Spearman correlation between the bacTRAP log₂FC enrichment "
-            "profile and mean expression per HypoMap cluster."
-        )
-
-        if len(corr_df) > 0:
-            st.subheader("Top Correlated Clusters")
-
-            # Highlight rows where Pearson is not significant (less credible)
-            if "both_significant" in corr_df.columns:
-                n_sig = int(corr_df["both_significant"].sum())
-                n_total = len(corr_df)
-                st.caption(
-                    f"**{n_sig}/{n_total}** clusters significant by both Pearson and "
-                    f"Spearman (BH-FDR < 0.05 across clusters). Rows failing the dual "
-                    f"test are highlighted — concordance between parametric and rank-"
-                    f"based correlations under multiple-testing correction is stronger "
-                    f"evidence than either nominal p-value alone."
-                )
-
-                def _highlight_nonsig(row):
-                    if "both_significant" in row.index and not row["both_significant"]:
-                        return ["background-color: #fff3cd"] * len(row)
-                    return [""] * len(row)
-
-                styled = corr_df.style.apply(_highlight_nonsig, axis=1).format({
-                    "pearson_r": "{:.4f}",
-                    "pearson_pval": "{:.2e}",
-                    "pearson_padj": "{:.2e}",
-                    "spearman_r": "{:.4f}",
-                    "spearman_pval": "{:.2e}",
-                    "spearman_padj": "{:.2e}",
-                })
-            else:
-                styled = corr_df.style.format({
-                    "pearson_r": "{:.4f}",
-                    "pearson_pval": "{:.2e}",
-                    "spearman_r": "{:.4f}",
-                    "spearman_pval": "{:.2e}",
-                })
-
-            st.dataframe(styled, use_container_width=True)
-
-            st.subheader("Supplementary Figure S1: Correlation Barplot")
-            fig_a = figure_correlation_barplot(corr_df, top_n=20, double_column=double_column)
-            st.pyplot(fig_a)
-            _cache_fig("fig_s1_correlation_barplot", fig_a)
-
-            col_pdf, col_svg = st.columns(2)
-            with col_pdf:
-                st.download_button(
-                    "Download PDF",
-                    st.session_state.fig_bytes["fig_s1_correlation_barplot"]["pdf"],
-                    "fig_s1_correlation.pdf", "application/pdf",
-                    key="dl_fig_s1_pdf",
-                )
-            with col_svg:
-                st.download_button(
-                    "Download SVG",
-                    st.session_state.fig_bytes["fig_s1_correlation_barplot"]["svg"],
-                    "fig_s1_correlation.svg", "image/svg+xml",
-                    key="dl_fig_s1_svg",
-                )
-            plt.close(fig_a)
-
-            st.download_button(
-                "Download correlation table (CSV)",
-                corr_df.to_csv(index=False).encode(),
-                _filtered_name("correlation_results.csv"), "text/csv",
-                key="dl_corr_csv_tab2",
-            )
-        else:
-            st.warning("No correlation results to display.")
-
-    # ======================================================================
     # TAB 4: UMAP Projection (Supplementary)
     # ======================================================================
     with tab4:
@@ -1954,196 +1742,6 @@ if run_button or st.session_state.analysis_done:
                 key="dl_fig_s2_svg",
             )
         plt.close(fig_b)
-
-    # ======================================================================
-    # TAB 5: Marker Overlap (Supplementary)
-    # ======================================================================
-    with tab5:
-        st.header("Supplementary: Marker Gene Overlap Analysis")
-        st.markdown(
-            "One-sided Fisher's exact test for overlap between bacTRAP-enriched genes "
-            "and HypoMap cluster markers."
-        )
-
-        if len(fisher_df) > 0:
-            st.subheader("Fisher's Exact Test Results")
-            display_fisher = fisher_df[[
-                "cluster", "overlap_count", "n_enriched", "n_markers",
-                "odds_ratio", "pvalue", "padj", "overlap_genes",
-            ]].copy()
-            st.dataframe(
-                display_fisher.style.format({
-                    "odds_ratio": "{:.2f}",
-                    "pvalue": "{:.2e}",
-                    "padj": "{:.2e}",
-                }),
-                use_container_width=True,
-            )
-
-            st.subheader("Supplementary Figure S3: Enrichment Volcano Plot")
-            fig_d = figure_volcano_enrichment(
-                fisher_df, pval_threshold=padj_cutoff,
-                double_column=double_column,
-            )
-            st.pyplot(fig_d)
-            _cache_fig("fig_s3_volcano_enrichment", fig_d)
-
-            col_pdf, col_svg = st.columns(2)
-            with col_pdf:
-                st.download_button(
-                    "Download PDF",
-                    st.session_state.fig_bytes["fig_s3_volcano_enrichment"]["pdf"],
-                    "fig_s3_volcano.pdf", "application/pdf",
-                    key="dl_fig_s3_pdf",
-                )
-            with col_svg:
-                st.download_button(
-                    "Download SVG",
-                    st.session_state.fig_bytes["fig_s3_volcano_enrichment"]["svg"],
-                    "fig_s3_volcano.svg", "image/svg+xml",
-                    key="dl_fig_s3_svg",
-                )
-            plt.close(fig_d)
-
-            # Dotplot — use correlation-ranked clusters (preferring dual-significant)
-            st.subheader("Supplementary Figure S4: Enriched Gene Dot Plot")
-            if len(corr_df) > 0 and "both_significant" in corr_df.columns:
-                _sig_dp = corr_df.loc[corr_df["both_significant"], "cluster"].tolist()
-                dotplot_clusters = _sig_dp[:15] if len(_sig_dp) >= 5 else corr_df["cluster"].tolist()[:15]
-            else:
-                dotplot_clusters = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
-            dotplot_genes = top_enriched_genes[:20]
-            fig_c = figure_dotplot(
-                enriched_mean_expr, frac_expr,
-                dotplot_genes, dotplot_clusters,
-                double_column=True,
-            )
-            st.pyplot(fig_c)
-            _cache_fig("fig_s4_dotplot", fig_c)
-
-            col_pdf, col_svg = st.columns(2)
-            with col_pdf:
-                st.download_button(
-                    "Download PDF",
-                    st.session_state.fig_bytes["fig_s4_dotplot"]["pdf"],
-                    "fig_s4_dotplot.pdf", "application/pdf",
-                    key="dl_fig_s4_pdf",
-                )
-            with col_svg:
-                st.download_button(
-                    "Download SVG",
-                    st.session_state.fig_bytes["fig_s4_dotplot"]["svg"],
-                    "fig_s4_dotplot.svg", "image/svg+xml",
-                    key="dl_fig_s4_svg",
-                )
-            plt.close(fig_c)
-
-            st.download_button(
-                "Download Fisher's test results (CSV)",
-                fisher_df.to_csv(index=False).encode(),
-                _filtered_name("fisher_test_results.csv"), "text/csv",
-                key="dl_fisher_csv_tab4",
-            )
-        else:
-            st.warning("No marker overlap results to display.")
-
-    # ======================================================================
-    # TAB 6: Gene Heatmap (Supplementary)
-    # ======================================================================
-    with tab6:
-        st.header("Supplementary: Gene Expression Heatmap")
-        st.markdown(
-            "Z-scored mean expression of top bacTRAP-enriched genes across "
-            "the highest-correlating HypoMap clusters."
-            + (
-                f" When the baseline {sanity_gene} filter is active, the "
-                f"cluster columns and the *z*-scoring reference are "
-                f"recomputed against the filtered cluster set so the "
-                f"displayed *z*-scores stay internally consistent with "
-                f"the shown cluster panel."
-                if baseline_allowed is not None else ""
-            )
-        )
-
-        if not zscore_df.empty:
-            st.subheader("Supplementary Figure S5: Heatmap")
-            fig_e = figure_heatmap(zscore_df, double_column=double_column)
-            st.pyplot(fig_e)
-            _cache_fig("fig_s5_heatmap", fig_e)
-
-            col_pdf, col_svg = st.columns(2)
-            with col_pdf:
-                st.download_button(
-                    "Download PDF",
-                    st.session_state.fig_bytes["fig_s5_heatmap"]["pdf"],
-                    "fig_s5_heatmap.pdf", "application/pdf",
-                    key="dl_fig_s5_pdf",
-                )
-            with col_svg:
-                st.download_button(
-                    "Download SVG",
-                    st.session_state.fig_bytes["fig_s5_heatmap"]["svg"],
-                    "fig_s5_heatmap.svg", "image/svg+xml",
-                    key="dl_fig_s5_svg",
-                )
-            plt.close(fig_e)
-        else:
-            st.warning("No heatmap data available with current parameters.")
-
-    # ======================================================================
-    # TAB 7: NNLS Deconvolution (Supplementary)
-    # ======================================================================
-    with tab7:
-        st.header("Supplementary: NNLS Deconvolution")
-        st.markdown(
-            "Non-negative least squares: find cluster weights that best "
-            "reconstruct the bacTRAP enrichment profile from cluster-level "
-            "expression signatures."
-        )
-
-        if len(nnls_df) > 0:
-            nonzero = nnls_df[nnls_df["weight"] > 1e-6]
-            st.metric("Clusters with non-zero weight", len(nonzero))
-
-            st.subheader("NNLS Weights")
-            st.dataframe(
-                nnls_df[nnls_df["weight"] > 1e-6][["cluster", "weight", "weight_norm"]].style.format({
-                    "weight": "{:.4f}",
-                    "weight_norm": "{:.4f}",
-                }),
-                use_container_width=True,
-            )
-
-            st.subheader("Supplementary Figure S6: NNLS Deconvolution")
-            fig_f = figure_nnls_barplot(nnls_df, top_n=20, double_column=double_column)
-            st.pyplot(fig_f)
-            _cache_fig("fig_s6_nnls", fig_f)
-
-            col_pdf, col_svg = st.columns(2)
-            with col_pdf:
-                st.download_button(
-                    "Download PDF",
-                    st.session_state.fig_bytes["fig_s6_nnls"]["pdf"],
-                    "fig_s6_nnls.pdf", "application/pdf",
-                    key="dl_fig_s6_pdf",
-                )
-            with col_svg:
-                st.download_button(
-                    "Download SVG",
-                    st.session_state.fig_bytes["fig_s6_nnls"]["svg"],
-                    "fig_s6_nnls.svg", "image/svg+xml",
-                    key="dl_fig_s6_svg",
-                )
-            plt.close(fig_f)
-
-            st.download_button(
-                "Download NNLS results (CSV)",
-                nnls_df.to_csv(index=False).encode(),
-                _filtered_name("nnls_results.csv"), "text/csv",
-                key="dl_nnls_csv",
-            )
-        else:
-            st.warning("NNLS deconvolution produced no results.")
 
     # ======================================================================
     # TAB 8: GSEA (Supplementary)
@@ -2279,23 +1877,6 @@ if run_button or st.session_state.analysis_done:
         st.markdown("---")
         st.subheader("Tables")
 
-        col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            st.download_button(
-                "Correlation results (CSV)",
-                corr_df.to_csv(index=False).encode(),
-                _filtered_name("correlation_results.csv"), "text/csv",
-                key="dl_corr_csv_export",
-            )
-        with col_t2:
-            if len(fisher_df) > 0:
-                st.download_button(
-                    "Fisher's test results (CSV)",
-                    fisher_df.to_csv(index=False).encode(),
-                    _filtered_name("fisher_test_results.csv"), "text/csv",
-                    key="dl_fisher_csv_export",
-                )
-
         col_t3, col_t4 = st.columns(2)
         with col_t3:
             st.download_button(
@@ -2313,23 +1894,7 @@ if run_button or st.session_state.analysis_done:
                     key="dl_enriched_csv",
                 )
 
-        if not zscore_df.empty:
-            st.download_button(
-                "Z-score heatmap data (CSV)",
-                zscore_df.to_csv().encode(),
-                _filtered_name("zscore_heatmap.csv"), "text/csv",
-                key="dl_zscore_csv",
-            )
-
-        col_t5, col_t6 = st.columns(2)
-        with col_t5:
-            if len(nnls_df) > 0:
-                st.download_button(
-                    "NNLS results (CSV)",
-                    nnls_df.to_csv(index=False).encode(),
-                    _filtered_name("nnls_results.csv"), "text/csv",
-                    key="dl_nnls_csv_export",
-                )
+        col_t6, _ = st.columns(2)
         with col_t6:
             if len(gsea_df) > 0:
                 st.download_button(

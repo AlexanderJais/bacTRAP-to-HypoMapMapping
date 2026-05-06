@@ -106,10 +106,10 @@ def _add_umap_axis_arrows(
     ax,
     x_label: str = "UMAP1",
     y_label: str = "UMAP2",
-    length: float = 0.07,
+    length: float = 0.04,
     origin: tuple = (0.02, 0.02),
-    linewidth: float = 0.5,
-    fontsize: float = 4.5,
+    linewidth: float = 0.4,
+    fontsize: float = 3.5,
 ) -> None:
     """Draw two small axis arrows in the bottom-left corner of a UMAP panel.
 
@@ -123,7 +123,7 @@ def _add_umap_axis_arrows(
     """
     x0, y0 = origin
     arrow_style = dict(
-        arrowstyle="-|>,head_length=1.5,head_width=1.0",
+        arrowstyle="-|>,head_length=0.5,head_width=0.3",
         linewidth=linewidth,
         color="black",
         shrinkA=0, shrinkB=0,
@@ -663,41 +663,29 @@ def figure_bactrap_volcano(
     ax.axvline(x=log2fc_cutoff, color="black", linestyle="--", linewidth=0.4, alpha=0.4)
     ax.axvline(x=-log2fc_cutoff, color="black", linestyle="--", linewidth=0.4, alpha=0.4)
 
-    # Label highlight genes (e.g. Pnoc) — always label these regardless of significance
+    # Only label the user-requested highlight genes (e.g. Pnoc). The
+    # previous "top-N by significance" auto-labelling crowded the panel and
+    # buried the gene of interest.
     if highlight_genes is None:
         highlight_genes = []
     highlight_set = set(g.lower() for g in highlight_genes)
 
-    # Auto-label top enriched genes + forced highlights
-    top_up = df[sig_up].nlargest(top_n_labels, "neg_log10_padj")
-    genes_to_label = set(top_up["_hypomap_gene_name"].tolist())
-
-    # Add highlight genes
-    for _, row in df.iterrows():
-        gname = str(row.get("_hypomap_gene_name", ""))
-        if gname.lower() in highlight_set:
-            genes_to_label.add(gname)
-
     texts = []
     for _, row in df.iterrows():
         gname = str(row.get("_hypomap_gene_name", ""))
-        if gname in genes_to_label:
-            is_highlight = gname.lower() in highlight_set
-            texts.append(
-                ax.text(
-                    row["log2FoldChange"], row["neg_log10_padj"],
-                    gname, fontsize=5 if is_highlight else 4.5,
-                    fontweight="bold" if is_highlight else "normal",
-                    color="#d62728" if is_highlight else "black",
-                )
+        if gname.lower() not in highlight_set:
+            continue
+        texts.append(
+            ax.text(
+                row["log2FoldChange"], row["neg_log10_padj"],
+                gname, fontsize=6, fontweight="bold", color="#d62728",
             )
-            # Mark highlight genes with a ring
-            if is_highlight:
-                ax.scatter(
-                    [row["log2FoldChange"]], [row["neg_log10_padj"]],
-                    s=50, facecolors="none", edgecolors="#d62728",
-                    linewidths=1.0, zorder=5,
-                )
+        )
+        ax.scatter(
+            [row["log2FoldChange"]], [row["neg_log10_padj"]],
+            s=50, facecolors="none", edgecolors="#d62728",
+            linewidths=1.0, zorder=5,
+        )
 
     if len(texts) > 0:
         adjust_text(
@@ -1234,8 +1222,8 @@ def figure_aucell_violins(
         [df_top.loc[df_top["cluster"] == c, "score"].values for c in top_clusters],
         positions=range(len(top_clusters)),
         vert=False,
-        showmeans=True,
-        showmedians=True,
+        showmeans=False,
+        showmedians=False,
         showextrema=False,
     )
 
@@ -1247,13 +1235,6 @@ def figure_aucell_violins(
         body.set_alpha(0.7)
         body.set_edgecolor("grey")
         body.set_linewidth(0.5)
-    if "cmeans" in parts:
-        parts["cmeans"].set_linewidth(0.8)
-        parts["cmeans"].set_color("black")
-    if "cmedians" in parts:
-        parts["cmedians"].set_linewidth(0.5)
-        parts["cmedians"].set_color("grey")
-        parts["cmedians"].set_linestyle("--")
 
     ax.set_yticks(range(len(top_clusters)))
     ax.set_yticklabels(top_clusters, fontsize=6)
@@ -1263,17 +1244,6 @@ def figure_aucell_violins(
     # Highest-mean cluster at the top of the plot (top_clusters[0]) rather
     # than at y=0 which matplotlib renders at the bottom.
     ax.invert_yaxis()
-
-    # Explicit legend for mean/median — without it the two vertical ticks
-    # inside each horizontal violin read as an ambiguous "I"-shape.
-    legend_handles = [
-        plt.Line2D([0], [0], color="black", linewidth=0.8, label="mean"),
-        plt.Line2D([0], [0], color="grey", linewidth=0.5, linestyle="--", label="median"),
-    ]
-    ax.legend(
-        handles=legend_handles, loc="lower right", fontsize=5,
-        frameon=False, handlelength=1.5, handletextpad=0.4,
-    )
 
     logger.info("figure_aucell_violins: %d clusters shown", len(top_clusters))
 
@@ -1445,10 +1415,13 @@ def figure_marker_gene_diagnostic(
     df = gene_stats.loc[available, ["mean_expr", "fraction_expressing"]].iloc[::-1]
     n_bars = len(df)
 
-    height = max(2.0, n_bars * 0.22 + 1.0)
+    # Generous per-row height + wider figure so the full cluster names
+    # (e.g. "C185-130: Chat.GABA-7") are legible without truncation.
+    height = max(2.5, n_bars * 0.32 + 1.0)
+    panel_width = max(width, 7.0)
     fig, (ax_mean, ax_frac) = plt.subplots(
-        1, 2, figsize=(width, height), sharey=True,
-        gridspec_kw={"wspace": 0.08},
+        1, 2, figsize=(panel_width, height), sharey=True,
+        gridspec_kw={"wspace": 0.55},
     )
 
     pass_mask = (df["fraction_expressing"] >= fraction_threshold).values
@@ -1462,10 +1435,10 @@ def figure_marker_gene_diagnostic(
         color=bar_colors, edgecolor="none", height=0.7,
     )
     ax_mean.set_yticks(range(n_bars))
-    ax_mean.set_yticklabels(df.index, fontsize=5)
+    ax_mean.set_yticklabels(df.index, fontsize=7)
     ax_mean.invert_xaxis()                       # bars grow leftward
     ax_mean.yaxis.tick_right()                   # labels live in the gutter
-    ax_mean.tick_params(axis="y", which="both", length=0, pad=2)
+    ax_mean.tick_params(axis="y", which="both", length=0, pad=4)
     ax_mean.set_xlabel(f"Mean {gene_name} expression\n(log-norm)")
     # Tighten x-limit so the label row reads as 0 → max
     mean_max = float(df["mean_expr"].max()) if n_bars else 0.0

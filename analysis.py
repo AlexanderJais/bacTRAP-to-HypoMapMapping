@@ -1339,69 +1339,54 @@ def compute_cluster_enrichment_stats(
 # =========================================================================
 
 def compute_composite_ranking(
-    corr_df: pd.DataFrame,
-    fisher_df: pd.DataFrame,
-    nnls_df: pd.DataFrame,
+    aucell_per_cluster_df: pd.DataFrame,
     gsea_df: Optional[pd.DataFrame] = None,
     allowed_clusters: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     """
-    Combine multiple ranking methods into a single consensus ranking.
+    Combine the two trustworthy methods — AUCell (per-cluster mean) and
+    preranked GSEA (NES) — into a single consensus ranking.
 
-    For each method, ranks are converted to percentile scores (0–1),
-    then averaged. This produces a robust ranking that doesn't depend
-    on any single method's assumptions.
+    Each method's cluster scores are converted to percentile ranks (0–1)
+    and averaged. AUCell mean captures per-cell signature recovery rolled
+    up to the cluster; GSEA NES captures position of cluster markers in
+    the bacTRAP enrichment ranking. The two methods are orthogonal and
+    together form the SCORE shown in the dashboard.
 
-    If ``allowed_clusters`` is provided, each input table is restricted
-    to that set BEFORE per-method ranks / percentiles are computed, so
-    the survivors are re-ranked against each other rather than inheriting
-    their global positions. Used to drop clusters that fail a Cre-driver
-    baseline-expression check before the composite vote.
+    If ``allowed_clusters`` is provided, both inputs are restricted to
+    that set BEFORE per-method ranks / percentiles are computed, so the
+    survivors are re-ranked against each other rather than inheriting
+    their global positions.
 
     Returns:
-        DataFrame with columns: cluster, corr_rank, fisher_rank, nnls_rank,
-        gsea_rank (if available), composite_score, sorted by composite_score.
+        DataFrame with columns: cluster, aucell_rank, aucell_pctl,
+        gsea_rank, gsea_pctl, composite_score, sorted by composite_score.
     """
-    if allowed_clusters is not None:
+    def _restrict(df, col="cluster"):
+        if df is None or len(df) == 0 or col not in df.columns:
+            return df
+        if allowed_clusters is None:
+            return df
         allowed_set = {str(c) for c in allowed_clusters}
+        mask = df[col].astype(str).isin(allowed_set)
+        return df.loc[mask].reset_index(drop=True)
 
-        def _restrict(df):
-            if df is None or len(df) == 0 or "cluster" not in df.columns:
-                return df
-            mask = df["cluster"].astype(str).isin(allowed_set)
-            return df.loc[mask].reset_index(drop=True)
+    aucell_in = _restrict(aucell_per_cluster_df)
+    gsea_in = _restrict(gsea_df)
 
-        corr_df = _restrict(corr_df)
-        fisher_df = _restrict(fisher_df)
-        nnls_df = _restrict(nnls_df)
-        gsea_df = _restrict(gsea_df)
+    rankings: Dict[str, pd.DataFrame] = {}
 
-    # Collect rankings from each method
-    rankings = {}
+    if aucell_in is not None and len(aucell_in) > 0 and "mean" in aucell_in.columns:
+        rank_aucell = aucell_in[["cluster", "mean"]].copy()
+        rank_aucell["aucell_rank"] = rank_aucell["mean"].rank(
+            ascending=False, method="min",
+        )
+        n = len(rank_aucell)
+        rank_aucell["aucell_pctl"] = 1 - (rank_aucell["aucell_rank"] - 1) / max(n - 1, 1)
+        rankings["aucell"] = rank_aucell.set_index("cluster")
 
-    if len(corr_df) > 0:
-        rank_corr = corr_df[["cluster", "spearman_r"]].copy()
-        rank_corr["corr_rank"] = rank_corr["spearman_r"].rank(ascending=False, method="min")
-        n = len(rank_corr)
-        rank_corr["corr_pctl"] = 1 - (rank_corr["corr_rank"] - 1) / max(n - 1, 1)
-        rankings["corr"] = rank_corr.set_index("cluster")
-
-    if len(fisher_df) > 0:
-        rank_fisher = fisher_df[["cluster", "pvalue"]].copy()
-        rank_fisher["fisher_rank"] = rank_fisher["pvalue"].rank(ascending=True, method="min")
-        n = len(rank_fisher)
-        rank_fisher["fisher_pctl"] = 1 - (rank_fisher["fisher_rank"] - 1) / max(n - 1, 1)
-        rankings["fisher"] = rank_fisher.set_index("cluster")
-
-    if len(nnls_df) > 0:
-        rank_nnls = nnls_df[["cluster", "weight"]].copy()
-        rank_nnls["nnls_rank"] = rank_nnls["weight"].rank(ascending=False, method="min")
-        n = len(rank_nnls)
-        rank_nnls["nnls_pctl"] = 1 - (rank_nnls["nnls_rank"] - 1) / max(n - 1, 1)
-        rankings["nnls"] = rank_nnls.set_index("cluster")
-
-    if gsea_df is not None and len(gsea_df) > 0:
-        rank_gsea = gsea_df[["cluster", "NES"]].copy()
+    if gsea_in is not None and len(gsea_in) > 0 and "NES" in gsea_in.columns:
+        rank_gsea = gsea_in[["cluster", "NES"]].copy()
         rank_gsea["gsea_rank"] = rank_gsea["NES"].rank(ascending=False, method="min")
         n = len(rank_gsea)
         rank_gsea["gsea_pctl"] = 1 - (rank_gsea["gsea_rank"] - 1) / max(n - 1, 1)
@@ -1410,26 +1395,26 @@ def compute_composite_ranking(
     if len(rankings) == 0:
         return pd.DataFrame(columns=["cluster", "composite_score"])
 
-    # Merge on cluster
-    all_clusters = set()
+    all_clusters: set = set()
     for r in rankings.values():
-        all_clusters.update(r.index)
+        all_clusters.update(r.index.astype(str))
 
     rows = []
     for cluster in all_clusters:
         row = {"cluster": cluster}
         pctls = []
         for method, rdf in rankings.items():
-            if cluster in rdf.index:
-                pctl = rdf.loc[cluster, f"{method}_pctl"]
-                row[f"{method}_rank"] = rdf.loc[cluster, f"{method}_rank"]
+            idx = rdf.index.astype(str)
+            if cluster in idx.values:
+                match = rdf.loc[idx == cluster].iloc[0]
+                row[f"{method}_rank"] = match[f"{method}_rank"]
+                pctl = match[f"{method}_pctl"]
                 row[f"{method}_pctl"] = pctl
                 pctls.append(pctl)
             else:
                 row[f"{method}_rank"] = np.nan
                 row[f"{method}_pctl"] = np.nan
                 pctls.append(np.nan)
-        # nanmean: only average over methods that have data for this cluster
         row["composite_score"] = float(np.nanmean(pctls))
         rows.append(row)
 
