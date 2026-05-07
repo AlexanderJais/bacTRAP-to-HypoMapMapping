@@ -87,8 +87,8 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 
 | Tab | Contents |
 |---|---|
-| **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, bacTRAP volcano plot, gene matching diagnostics |
-| **AUCell (Main Figure)** | Main **Figure 1a–c** (AUCell UMAP, cell-type UMAP with top-15 clusters highlighted, violin distributions) plus supplementary panels S2/S3/S11 (per-cluster barplot, global histogram, composite consensus ranking) |
+| **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, **two bacTRAP volcano panels** with QPLOT-marker highlights (core: Pnoc + Qrfp/Ptger3/Lepr/Opn5/Tacr3; extended: core + Bdnf/Adcyap1/Esr1/Trpm2/Sncg), gene matching diagnostics |
+| **AUCell (Main Figure)** | Main **Figure 1a–c** (AUCell UMAP, cell-type UMAP with top-15 clusters highlighted, violin distributions); **QPLOT marker co-expression** panels (cluster dot plot, per-cell heatmap, pairwise co-expression matrix with detection-fold side panel) for testing whether the bacTRAP-defined pool matches the preoptic QPLOT population (Upton, D'Souza & Lang, 2021); plus supplementary panels S2/S3/S11 (per-cluster barplot, global histogram, composite consensus ranking) |
 | **Cre-driver Check** | Sanity check + optional baseline filter. Per-cluster expression of the Cre-driver gene (default `Pnoc`) across the top-ranked clusters from the composite consensus, with a configurable "fraction expressing" threshold that highlights (but does not drop) suspicious hits. The sidebar's "Baseline Cre-driver mean expression" slider additionally enforces a minimum expression floor that feeds back into every cluster-level ranking (correlation, Fisher, NNLS, GSEA, composite, AUCell); filtered CSV exports are suffixed with the filter signature (e.g. `composite_ranking_pnoc_ge0p05.csv`) |
 | **Correlation (Suppl.)** | Ranked cluster table + correlation barplot (Supplementary Figure S1) |
 | **UMAP Projection (Suppl.)** | Two-panel UMAP: cell-type annotation + AUCell score, side-by-side (Supplementary Figure S4) |
@@ -173,6 +173,16 @@ Two related knobs that share the Cre-driver gene set via the sidebar:
 - **Filenames of filtered exports** are suffixed with the filter signature (e.g. `correlation_results_pnoc_ge0p05.csv`) so a collaborator opening a trimmed table from the Export tab can tell at a glance that it's a subset, not the full atlas.
 - **Output:** diagnostic barplot of fraction-expressing per cluster with the user-defined threshold marked, plus a per-cluster sanity table and CSV; when the baseline filter is active, every ranking-related tab acts on the restricted cluster universe.
 
+### 10. QPLOT Marker Co-expression
+
+A targeted check that the bacTRAP IP captured the preoptic **QPLOT** population — an excitatory MnPO/MPO neuron class defined by Upton, D'Souza & Lang (*Front. Neurosci.* 2021; PMID 34017237) as co-expressing **Qrfp, Ptger3 (EP3R), Lepr, Opn5, Tacr3** with extensive overlap of **Bdnf, Adcyap1 (PACAP), Esr1, Trpm2, Sncg**. The Pnoc Cre driver itself is included alongside the canonical QPLOT markers as the sixth core gene. Three complementary views are produced:
+
+- **QPLOT dot plot** (cluster-level). Mean log-normalised expression and fraction of cells expressing each of the 11 QPLOT genes are computed across the top 20 HypoMap clusters by mean AUCell score (subject to the same size and baseline-filter floors as the main figures), giving a single panel that asks: do the AUCell-prioritised clusters also light up for the QPLOT marker set?
+- **Per-cell heatmap of the high-AUCell pool.** Cells with AUCell score in the top *q*-quantile of the atlas (slider, default 10 %) are extracted; their log1p(CP10k) expression for the 11 QPLOT markers is rendered as a cells × genes heatmap, grouped by HypoMap cluster (top 10 most-represented clusters in the pool, capped at 200 cells per cluster). Within each cluster band, cells are ordered by AUCell score (descending), so visually contiguous bands of yellow indicate cluster-internal co-expression rather than scattered single-cell hits.
+- **Pairwise co-expression matrix.** Symmetric matrix in which entry (*i*, *j*) is the percentage of high-AUCell cells in which both gene *i* and gene *j* are detected (raw count > 0); diagonal entries equal each gene's individual detection rate in the same pool. A side panel shows the log₂ fold-enrichment of detection in the high-AUCell pool relative to the rest of the atlas — positive bars (red) indicate the marker is more frequently detected in bacTRAP-like cells than elsewhere.
+
+Cluster-level mean and fraction-expressing matrices are computed via the same `compute_cluster_mean_expression` / `compute_fraction_expressing` helpers used elsewhere; the per-cell view is computed by `compute_qplot_coexpression`. Both are cached in `st.session_state["_qplot_cache"]`, keyed on the analysis fingerprint, the resolved gene-index tuple, the annotation column, and (for the per-cell view) the top-quantile slider, so reruns triggered by unrelated widgets do not re-extract the atlas submatrix. Each panel exports as PDF / SVG, and the dot plot and pairwise matrix additionally export as CSV (long-form `gene, cluster, mean_expr, fraction_expressing` for the dot plot; gene × gene fraction matrix for the pairwise view).
+
 ---
 
 ## Figures
@@ -208,7 +218,11 @@ All figures follow Nature journal specifications:
 
 | Figure | Type | Description | Baseline filter |
 |---|---|---|---|
-| **Volcano** (Data Overview) | Scatter plot | bacTRAP gene-level volcano (log₂FC vs −log₁₀ padj), with Pnoc and top enriched genes labelled | No (gene-level) |
+| **Volcano (core)** (Data Overview) | Scatter plot | bacTRAP gene-level volcano (log₂FC vs −log₁₀ padj), with the **QPLOT core** (Pnoc, Qrfp, Ptger3, Lepr, Opn5, Tacr3) ringed and labelled alongside the top auto-labelled enriched genes | No (gene-level) |
+| **Volcano (extended)** (Data Overview) | Scatter plot | Same as above with the **QPLOT extended** set highlighted (core + Bdnf, Adcyap1, Esr1, Trpm2, Sncg) | No (gene-level) |
+| **QPLOT dot plot** (AUCell tab) | Dot plot | 11 QPLOT markers across the top 20 HypoMap clusters by mean AUCell score (≥ 20 cells, baseline-filter-aware). Dot size = fraction expressing; colour = mean log-normalised expression | Yes |
+| **QPLOT per-cell heatmap** (AUCell tab) | Cell × gene heatmap | High-AUCell cells (top *q*-quantile, default 10 %) × 11 QPLOT markers, grouped by HypoMap cluster (top 10 represented, capped at 200 cells/cluster) and ordered by AUCell within cluster; left margin band marks the cluster of origin | No (per-cell) |
+| **QPLOT pairwise matrix** (AUCell tab) | Symmetric heatmap + side barplot | Pairwise % co-expression among high-AUCell cells (diagonal = individual detection rate); side panel = log₂ fold-enrichment of detection in the high-AUCell pool relative to the rest of the atlas | No (per-cell) |
 | **S1** | Horizontal barplot | Top 20 clusters by Spearman correlation, coloured by ρ; hatched bars mark non-significant pairs | Yes |
 | **S2** | Horizontal barplot | Mean AUCell score per cluster (top 25, ≥ 20 cells), SEM error bars, magma colormap | Yes |
 | **S3** | Histogram | Global AUCell score distribution with 90/95/99th-percentile markers | No (per-cell) |
@@ -265,11 +279,12 @@ bacTRAP-to-HypoMapMapping/
 - `compute_aucell_scores()` -- rank-based AUCell scoring with per-cell random-jitter tie-breaking (Aibar 2017); optional `info_out` dict returns match rate, `n_top` and top-fraction-bump diagnostics
 - `compute_cluster_enrichment_stats()` -- per-cluster Welch's one-sided *t*-test vs. rest of atlas, with Benjamini–Hochberg *q*-values
 - `compute_composite_ranking()` -- percentile-averaged consensus across all methods
+- `compute_qplot_coexpression()` -- per-cell QPLOT-marker co-expression for cells in the top *q*-quantile of AUCell: returns log1p(CP10k) per-cell expression (cells × markers), pairwise co-expression fractions, per-gene detection rate in the top pool and the rest of the atlas, and aligned cluster labels. Used by the QPLOT per-cell heatmap and pairwise matrix panels
 
 **`figures.py`**
 - `setup_nature_style()` -- global matplotlib configuration for Nature specs
 - `_add_umap_axis_arrows()` -- shared helper drawing the compact "UMAP1 / UMAP2" arrows in the bottom-left corner of any dimensionality-reduction panel
-- `figure_bactrap_volcano()` -- bacTRAP gene-level volcano with highlight support
+- `figure_bactrap_volcano()` -- bacTRAP gene-level volcano with caller-supplied highlight set and customisable title (used for both the QPLOT core and QPLOT extended panels)
 - `figure_correlation_barplot()` -- correlation barplot (Suppl. S1)
 - `figure_umap_enrichment()` -- two-panel UMAP, cell types + enrichment (Suppl. S4)
 - `figure_aucell_umap()` -- AUCell score projected onto HypoMap UMAP (**Figure 1a**)
@@ -277,7 +292,9 @@ bacTRAP-to-HypoMapMapping/
 - `figure_aucell_cluster_barplot()` -- per-cluster AUCell means with SEM, size-filtered ranking (Suppl. S2)
 - `figure_aucell_violins()` -- per-cluster AUCell distributions, size-filtered ranking (**Figure 1c**)
 - `figure_aucell_histogram()` -- global AUCell score distribution (Suppl. S3)
-- `figure_dotplot()` -- enriched gene dot plot (Suppl. S6)
+- `figure_dotplot()` -- enriched gene dot plot (Suppl. S6); reused for the QPLOT cluster dot plot via the `title` argument
+- `figure_qplot_coexpression_heatmap()` -- per-cell QPLOT-marker heatmap with cluster band on the left margin; cells grouped by cluster (top-N most-represented, configurable cap per cluster) and ordered by AUCell score within cluster
+- `figure_qplot_pairwise_coexpression()` -- symmetric % co-expression matrix among high-AUCell cells with annotated cells and an optional log₂(detection top / rest) side panel
 - `figure_volcano_enrichment()` -- Fisher's test volcano (Suppl. S5)
 - `figure_heatmap()` -- z-scored expression heatmap (Suppl. S7)
 - `figure_nnls_barplot()` -- NNLS weight barplot (Suppl. S8)
@@ -342,7 +359,7 @@ The log file can be downloaded from the **Export** tab (standalone or included i
 
 The bacTRAP IP sample is already enriched for a specific Cre-expressing neuronal population via ribosomal tagging in the preoptic area (PoA). This is **not** a standard bulk deconvolution problem -- the goal is to identify which HypoMap cell types/subtypes best match the translational profile captured by the bacTRAP pulldown. All labels and metrics in the app reflect this framing (e.g., "bacTRAP enrichment score", not "cell-type proportion").
 
-The tool applies five complementary approaches (correlation, Fisher's overlap, NNLS deconvolution, GSEA, and AUCell) to provide a robust, multi-method consensus on which cell populations are captured by the bacTRAP pulldown.
+The tool applies five complementary approaches (correlation, Fisher's overlap, NNLS deconvolution, GSEA, and AUCell) to provide a robust, multi-method consensus on which cell populations are captured by the bacTRAP pulldown. For Pnoc-Cre preoptic experiments specifically, a dedicated **QPLOT marker co-expression** section tests whether the IP-defined pool matches the unifying QPLOT identity proposed by Upton, D'Souza & Lang (2021) — an MnPO/MPO excitatory neuron class co-expressing Qrfp, Ptger3, Lepr, Opn5 and Tacr3 — using highlighted volcano plots, a cluster-level dot plot of QPLOT markers, a per-cell heatmap of the high-AUCell pool, and a pairwise co-expression matrix.
 
 ---
 
@@ -352,6 +369,7 @@ The tool applies five complementary approaches (correlation, Fisher's overlap, N
 - Heiman, M. et al. A translational profiling approach for the molecular characterization of CNS cell types. *Cell* **135**, 738--748 (2008).
 - Subramanian, A. et al. Gene set enrichment analysis: a knowledge-based approach. *PNAS* **102**, 15545--15550 (2005).
 - Aibar, S. et al. SCENIC: single-cell regulatory network inference and clustering. *Nature Methods* **14**, 1083--1086 (2017).
+- Upton, D. H., D'Souza, M. R. & Lang, R. J. The QPLOT neuron -- a converging point for warm-defensive thermoregulation and sleep. *Frontiers in Neuroscience* **15**, 665504 (2021). [PMID: 34017237](https://pubmed.ncbi.nlm.nih.gov/34017237/)
 - Love, M. I., Huber, W. & Anders, S. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. *Genome Biology* **15**, 550 (2014).
 - Wolf, F. A., Angerer, P. & Theis, F. J. SCANPY: large-scale single-cell gene expression data analysis. *Genome Biology* **19**, 15 (2018).
 - Xiao, Y. et al. A novel significance score for gene selection and ranking. *Bioinformatics* **30**, 801--807 (2014).
