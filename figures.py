@@ -527,7 +527,6 @@ def figure_qplot_coexpression_heatmap(
     aucell_scores_high: Optional[np.ndarray] = None,
     max_clusters_shown: int = 10,
     max_cells_per_cluster: int = 200,
-    threshold: float = 0.0,
     double_column: bool = True,
     title: str = "QPLOT marker expression in high-AUCell cells",
 ) -> plt.Figure:
@@ -563,21 +562,21 @@ def figure_qplot_coexpression_heatmap(
     else:
         df["_aucell"] = 0.0
 
-    # Pick top-N clusters by cell count in the high-AUCell pool
+    # Pick top-N clusters by cell count in the high-AUCell pool, then
+    # promote _cluster to an ordered Categorical up-front so a single
+    # sort pass orders cells by (cluster rank, AUCell desc).
     counts = df["_cluster"].value_counts()
     top_clusters = counts.head(max_clusters_shown).index.tolist()
     df = df[df["_cluster"].isin(top_clusters)].copy()
+    df["_cluster"] = pd.Categorical(df["_cluster"], categories=top_clusters, ordered=True)
+    df = df.sort_values(["_cluster", "_aucell"], ascending=[True, False])
 
     # Cap cells per cluster (highest AUCell score retained) so a single
     # huge cluster doesn't drown out the others visually.
     df = (
-        df.sort_values(["_cluster", "_aucell"], ascending=[True, False])
-        .groupby("_cluster", group_keys=False, sort=False)
+        df.groupby("_cluster", group_keys=False, sort=False, observed=True)
         .head(max_cells_per_cluster)
     )
-    # Re-sort: cluster order = top_clusters order, AUCell descending within
-    df["_cluster"] = pd.Categorical(df["_cluster"], categories=top_clusters, ordered=True)
-    df = df.sort_values(["_cluster", "_aucell"], ascending=[True, False])
 
     gene_cols = [c for c in df.columns if c not in ("_cluster", "_aucell")]
     M = df[gene_cols].values.astype(float)
@@ -689,24 +688,28 @@ def figure_qplot_pairwise_coexpression(
     ax.set_title(title, fontsize=8)
 
     # Annotate each cell with the fraction (% form). Choose text colour for
-    # contrast against the cell value.
-    threshold = 0.5 * float(np.nanmax(M)) if np.isfinite(np.nanmax(M)) else 0.5
+    # contrast against the cell value. Use one decimal place so small but
+    # nonzero overlaps (e.g. 0.4%) don't display as exact "0".
+    contrast_threshold = (
+        0.5 * float(np.nanmax(M)) if np.isfinite(np.nanmax(M)) else 0.5
+    )
     for i in range(n):
         for j in range(n):
             v = M[i, j]
             if not np.isfinite(v):
                 continue
             ax.text(
-                j, i, f"{v * 100:.0f}",
+                j, i, f"{v * 100:.1f}",
                 ha="center", va="center", fontsize=5,
-                color="white" if v < threshold else "black",
+                color="white" if v < contrast_threshold else "black",
             )
 
     cbar = fig.colorbar(im, ax=ax, shrink=0.6, aspect=15, pad=0.04)
     cbar.set_label("% co-expressing", fontsize=6)
     cbar.ax.tick_params(labelsize=5)
-    cbar.formatter = plt.FuncFormatter(lambda x, _: f"{x * 100:.0f}")
-    cbar.update_ticks()
+    cbar.ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda x, _: f"{x * 100:.0f}")
+    )
 
     if show_fold:
         common = [g for g in genes if g in frac_in_top.index and g in frac_in_bg.index]

@@ -1671,24 +1671,44 @@ if run_button or st.session_state.analysis_done:
                 f"`{', '.join(_qplot_unmatched)}` — excluded from the panels below."
             )
 
+        # Cache QPLOT artefacts in session state so reruns triggered by
+        # unrelated widgets (download clicks, tab switches) don't re-extract
+        # the atlas submatrix or recompute log-norm. The cache busts on any
+        # change to the analysis fingerprint, the resolved gene indices,
+        # the cluster annotation, or — for the per-cell coexpression — the
+        # top-quantile slider.
+        _qplot_cache = st.session_state.setdefault("_qplot_cache", {})
+        _qplot_indices_key = tuple(_qplot_indices)
+
         if len(_qplot_indices) > 0 and len(_qplot_top_clusters) > 0:
-            try:
-                _qplot_mean_expr = compute_cluster_mean_expression(
-                    adata, _qplot_indices, annotation_col,
-                    min_cells=min_cells_per_cluster,
-                    indices_in_raw=_adata_has_raw,
-                    normalize=True,
-                )
-                _qplot_frac_expr = compute_fraction_expressing(
-                    adata, _qplot_indices, annotation_col,
-                    min_cells=min_cells_per_cluster,
-                    indices_in_raw=_adata_has_raw,
-                )
-            except Exception as e:
-                logger.exception("QPLOT mean/fraction expression failed")
-                st.warning(f"Could not compute QPLOT cluster expression: {e}")
-                _qplot_mean_expr = pd.DataFrame()
-                _qplot_frac_expr = pd.DataFrame()
+            _dot_key = (
+                _analysis_params, annotation_col,
+                min_cells_per_cluster, _qplot_indices_key,
+            )
+            if _qplot_cache.get("dot_key") != _dot_key:
+                try:
+                    _qplot_mean_expr = compute_cluster_mean_expression(
+                        adata, _qplot_indices, annotation_col,
+                        min_cells=min_cells_per_cluster,
+                        indices_in_raw=_adata_has_raw,
+                        normalize=True,
+                    )
+                    _qplot_frac_expr = compute_fraction_expressing(
+                        adata, _qplot_indices, annotation_col,
+                        min_cells=min_cells_per_cluster,
+                        indices_in_raw=_adata_has_raw,
+                    )
+                except Exception as e:
+                    logger.exception("QPLOT mean/fraction expression failed")
+                    st.warning(f"Could not compute QPLOT cluster expression: {e}")
+                    _qplot_mean_expr = pd.DataFrame()
+                    _qplot_frac_expr = pd.DataFrame()
+                _qplot_cache["dot_key"] = _dot_key
+                _qplot_cache["mean_expr"] = _qplot_mean_expr
+                _qplot_cache["frac_expr"] = _qplot_frac_expr
+            else:
+                _qplot_mean_expr = _qplot_cache["mean_expr"]
+                _qplot_frac_expr = _qplot_cache["frac_expr"]
 
             if not _qplot_mean_expr.empty and not _qplot_frac_expr.empty:
                 st.markdown(
@@ -1711,7 +1731,29 @@ if run_button or st.session_state.analysis_done:
                 st.pyplot(fig_qplot_dot)
                 _cache_fig("fig_qplot_dotplot", fig_qplot_dot)
 
-                col_pdf, col_svg = st.columns(2)
+                # Long-form CSV: gene × cluster × (mean_expr, fraction_expressing)
+                # so the source data underlying the dotplot can be reproduced
+                # without joining two wide tables.
+                _qplot_dot_genes = [
+                    g for g in _qplot_resolved
+                    if g in _qplot_mean_expr.index and g in _qplot_frac_expr.index
+                ]
+                _qplot_dot_cl = [
+                    c for c in _qplot_top_clusters
+                    if c in _qplot_mean_expr.columns and c in _qplot_frac_expr.columns
+                ]
+                _qplot_dot_long = (
+                    _qplot_mean_expr.loc[_qplot_dot_genes, _qplot_dot_cl]
+                    .stack().rename("mean_expr").reset_index()
+                    .rename(columns={"level_0": "gene", "level_1": "cluster"})
+                )
+                _qplot_dot_long["fraction_expressing"] = (
+                    _qplot_frac_expr.loc[_qplot_dot_genes, _qplot_dot_cl]
+                    .stack().reset_index(drop=True)
+                )
+                _qplot_dot_csv = _qplot_dot_long.to_csv(index=False).encode("utf-8")
+
+                col_pdf, col_svg, col_csv = st.columns(3)
                 with col_pdf:
                     st.download_button(
                         "Download PDF",
@@ -1725,6 +1767,18 @@ if run_button or st.session_state.analysis_done:
                         st.session_state.fig_bytes["fig_qplot_dotplot"]["svg"],
                         "fig_qplot_dotplot.svg", "image/svg+xml",
                         key="dl_fig_qplot_dot_svg",
+                    )
+                with col_csv:
+                    st.download_button(
+                        "Download CSV (source)",
+                        _qplot_dot_csv,
+                        "fig_qplot_dotplot.csv", "text/csv",
+                        key="dl_fig_qplot_dot_csv",
+                        help=(
+                            "Long-form table: gene, cluster, mean_expr "
+                            "(log-normalised), fraction_expressing — the "
+                            "exact values plotted as dot colour and size."
+                        ),
                     )
                 plt.close(fig_qplot_dot)
 
@@ -1742,18 +1796,26 @@ if run_button or st.session_state.analysis_done:
             key="qplot_top_quantile",
         )
 
-        try:
-            _qplot_co = compute_qplot_coexpression(
-                adata, QPLOT_EXTENDED_HIGHLIGHTS, aucell_scores,
-                cell_labels=cell_labels,
-                top_quantile=float(_qplot_top_quantile),
-                expr_threshold=0.0,
-                use_raw=True,
-            )
-        except Exception as e:
-            logger.exception("QPLOT co-expression failed")
-            st.warning(f"Could not compute QPLOT co-expression: {e}")
-            _qplot_co = None
+        _co_key = (
+            _analysis_params, _qplot_indices_key, float(_qplot_top_quantile),
+        )
+        if _qplot_cache.get("co_key") != _co_key:
+            try:
+                _qplot_co = compute_qplot_coexpression(
+                    adata, QPLOT_EXTENDED_HIGHLIGHTS, aucell_scores,
+                    cell_labels=cell_labels,
+                    top_quantile=float(_qplot_top_quantile),
+                    expr_threshold=0.0,
+                    use_raw=True,
+                )
+            except Exception as e:
+                logger.exception("QPLOT co-expression failed")
+                st.warning(f"Could not compute QPLOT co-expression: {e}")
+                _qplot_co = None
+            _qplot_cache["co_key"] = _co_key
+            _qplot_cache["co"] = _qplot_co
+        else:
+            _qplot_co = _qplot_cache["co"]
 
         if _qplot_co is not None and not _qplot_co["per_cell_expr"].empty:
             _high_cell_idx = _qplot_co["high_cell_idx"]
