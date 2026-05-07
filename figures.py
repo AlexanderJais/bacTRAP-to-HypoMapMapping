@@ -608,6 +608,7 @@ def figure_bactrap_volcano(
     log2fc_cutoff: float = 1.0,
     top_n_labels: int = 15,
     double_column: bool = False,
+    title: str = "bacTRAP translational profiling (PoA IP vs Input)",
 ) -> plt.Figure:
     """
     Classic volcano plot of bacTRAP DESeq2 results.
@@ -707,7 +708,7 @@ def figure_bactrap_volcano(
 
     ax.set_xlabel(r"$\log_2$(Fold Change)")
     ax.set_ylabel(r"$-\log_{10}$(adjusted p-value)")
-    ax.set_title("bacTRAP translational profiling (PoA IP vs Input)")
+    ax.set_title(title)
     ax.legend(fontsize=5, frameon=False, loc="upper left")
 
     return fig

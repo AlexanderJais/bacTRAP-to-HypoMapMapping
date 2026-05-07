@@ -1244,13 +1244,32 @@ if run_button or st.session_state.analysis_done:
         else:
             st.warning("No genes pass the current enrichment thresholds.")
 
-        st.subheader("Figure: bacTRAP Volcano Plot")
+        # QPLOT marker sets (Upton, D'Souza & Lang, Front. Neurosci. 2021,
+        # PMID 34017237). Mouse gene symbols. "Core" = the five canonical
+        # QPLOT markers + Pnoc (the bacTRAP Cre driver). "Extended" adds
+        # neuropeptides / receptors / channels reported to overlap the
+        # QPLOT population.
+        QPLOT_CORE_HIGHLIGHTS = [
+            "Pnoc", "Qrfp", "Ptger3", "Lepr", "Opn5", "Tacr3",
+        ]
+        QPLOT_EXTENDED_HIGHLIGHTS = QPLOT_CORE_HIGHLIGHTS + [
+            "Bdnf", "Adcyap1", "Esr1", "Trpm2", "Sncg",
+        ]
+
+        st.subheader("Figure: bacTRAP Volcano Plot — QPLOT core markers")
+        st.caption(
+            "Highlighted: Pnoc (Cre driver) plus the canonical QPLOT markers "
+            "(Qrfp, Ptger3/EP3R, Lepr, Opn5, Tacr3). "
+            "QPLOT = preoptic excitatory population defined by Upton, "
+            "D'Souza & Lang, *Front. Neurosci.* 2021 (PMID 34017237)."
+        )
         fig_volcano = figure_bactrap_volcano(
             bactrap_matched,
-            highlight_genes=["Pnoc"],
+            highlight_genes=QPLOT_CORE_HIGHLIGHTS,
             padj_cutoff=padj_cutoff,
             log2fc_cutoff=log2fc_cutoff,
             double_column=double_column,
+            title="bacTRAP (PoA IP vs Input) — QPLOT core markers highlighted",
         )
         st.pyplot(fig_volcano)
         _cache_fig("fig_volcano_bactrap", fig_volcano)
@@ -1271,6 +1290,39 @@ if run_button or st.session_state.analysis_done:
                 key="dl_fig_volcano_bt_svg",
             )
         plt.close(fig_volcano)
+
+        st.subheader("Figure: bacTRAP Volcano Plot — QPLOT extended set")
+        st.caption(
+            "Highlighted: QPLOT core markers + reported overlap genes "
+            "(Bdnf, Adcyap1/PACAP, Esr1, Trpm2, Sncg)."
+        )
+        fig_volcano_ext = figure_bactrap_volcano(
+            bactrap_matched,
+            highlight_genes=QPLOT_EXTENDED_HIGHLIGHTS,
+            padj_cutoff=padj_cutoff,
+            log2fc_cutoff=log2fc_cutoff,
+            double_column=double_column,
+            title="bacTRAP (PoA IP vs Input) — QPLOT extended marker set",
+        )
+        st.pyplot(fig_volcano_ext)
+        _cache_fig("fig_volcano_bactrap_qplot_ext", fig_volcano_ext)
+
+        col_pdf2, col_svg2 = st.columns(2)
+        with col_pdf2:
+            st.download_button(
+                "Download PDF",
+                st.session_state.fig_bytes["fig_volcano_bactrap_qplot_ext"]["pdf"],
+                "fig_volcano_bactrap_qplot_extended.pdf", "application/pdf",
+                key="dl_fig_volcano_bt_qplot_ext_pdf",
+            )
+        with col_svg2:
+            st.download_button(
+                "Download SVG",
+                st.session_state.fig_bytes["fig_volcano_bactrap_qplot_ext"]["svg"],
+                "fig_volcano_bactrap_qplot_extended.svg", "image/svg+xml",
+                key="dl_fig_volcano_bt_qplot_ext_svg",
+            )
+        plt.close(fig_volcano_ext)
 
     # ======================================================================
     # TAB: AUCell (MAIN FIGURE)
