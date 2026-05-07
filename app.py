@@ -355,6 +355,7 @@ from analysis import (
     validate_aucell_input,
     compute_cluster_enrichment_stats,
     compute_composite_ranking,
+    compute_qplot_coexpression,
 )
 from figures import (
     setup_nature_style,
@@ -374,8 +375,21 @@ from figures import (
     figure_aucell_histogram,
     figure_composite_ranking,
     figure_marker_gene_diagnostic,
+    figure_qplot_coexpression_heatmap,
+    figure_qplot_pairwise_coexpression,
     fig_to_bytes,
 )
+
+# QPLOT marker sets (Upton, D'Souza & Lang, Front. Neurosci. 2021,
+# PMID 34017237). Mouse gene symbols. "Core" = the five canonical QPLOT
+# markers + Pnoc (the bacTRAP Cre driver). "Extended" adds neuropeptides /
+# receptors / channels reported to overlap the QPLOT population.
+QPLOT_CORE_HIGHLIGHTS = [
+    "Pnoc", "Qrfp", "Ptger3", "Lepr", "Opn5", "Tacr3",
+]
+QPLOT_EXTENDED_HIGHLIGHTS = QPLOT_CORE_HIGHLIGHTS + [
+    "Bdnf", "Adcyap1", "Esr1", "Trpm2", "Sncg",
+]
 
 # Load data with caching
 with st.spinner("Loading data..."):
@@ -1244,18 +1258,6 @@ if run_button or st.session_state.analysis_done:
         else:
             st.warning("No genes pass the current enrichment thresholds.")
 
-        # QPLOT marker sets (Upton, D'Souza & Lang, Front. Neurosci. 2021,
-        # PMID 34017237). Mouse gene symbols. "Core" = the five canonical
-        # QPLOT markers + Pnoc (the bacTRAP Cre driver). "Extended" adds
-        # neuropeptides / receptors / channels reported to overlap the
-        # QPLOT population.
-        QPLOT_CORE_HIGHLIGHTS = [
-            "Pnoc", "Qrfp", "Ptger3", "Lepr", "Opn5", "Tacr3",
-        ]
-        QPLOT_EXTENDED_HIGHLIGHTS = QPLOT_CORE_HIGHLIGHTS + [
-            "Bdnf", "Adcyap1", "Esr1", "Trpm2", "Sncg",
-        ]
-
         st.subheader("Figure: bacTRAP Volcano Plot — QPLOT core markers")
         st.caption(
             "Highlighted: Pnoc (Cre driver) plus the canonical QPLOT markers "
@@ -1614,6 +1616,229 @@ if run_button or st.session_state.analysis_done:
                 help="Per-cell AUCell scores — use to reconstruct the full violin shape.",
             )
         plt.close(fig_1c)
+
+        # ------------------------------------------------------------------
+        # QPLOT marker co-expression
+        # ------------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("QPLOT Marker Co-expression")
+        st.markdown(
+            "Targeted check that the bacTRAP-defined cell pool matches the "
+            "preoptic **QPLOT** population (Upton, D'Souza & Lang, "
+            "*Front. Neurosci.* 2021; PMID 34017237): an excitatory "
+            "MnPO/MPO neuron class co-expressing **QRFP, PTGER3 (EP3R), "
+            "LEPR, Opn5, Tacr3** with extensive overlap of **BDNF, PACAP "
+            "(Adcyap1), Esr1, Trpm2, Sncg**. Three views below: (i) a dot "
+            "plot of QPLOT-marker expression in the top AUCell-ranked "
+            "HypoMap clusters, (ii) a per-cell heatmap of QPLOT-marker "
+            "expression in the high-AUCell cell pool, and (iii) a pairwise "
+            "co-expression matrix among those cells."
+        )
+
+        # Top-N AUCell-ranked clusters (≥ min_cells_for_rank), respecting
+        # the optional baseline-Cre filter so we don't show noise clusters.
+        _qplot_dot_top_n = 20
+        _ranked_for_qplot = (
+            aucell_per_cluster_df[aucell_per_cluster_df["n_cells"] >= min_cells_for_rank]
+            .sort_values("mean", ascending=False)
+        )
+        if baseline_allowed is not None:
+            _ranked_for_qplot = _ranked_for_qplot[
+                _ranked_for_qplot["cluster"].astype(str).isin(baseline_allowed)
+            ]
+        _qplot_top_clusters = (
+            _ranked_for_qplot.head(_qplot_dot_top_n)["cluster"].astype(str).tolist()
+        )
+
+        # Resolve QPLOT genes against the same atlas lookup used elsewhere
+        # so we get the actual stored symbols (handles capitalisation /
+        # alias drift).
+        _qplot_indices: List[int] = []
+        _qplot_resolved: List[str] = []
+        _qplot_unmatched: List[str] = []
+        for _g in QPLOT_EXTENDED_HIGHLIGHTS:
+            _key = str(_g).strip().lower()
+            if _key in _adata_lookup:
+                _disp, _idx = _adata_lookup[_key]
+                _qplot_resolved.append(_disp)
+                _qplot_indices.append(int(_idx))
+            else:
+                _qplot_unmatched.append(_g)
+
+        if _qplot_unmatched:
+            st.caption(
+                f"QPLOT markers not found in the atlas: "
+                f"`{', '.join(_qplot_unmatched)}` — excluded from the panels below."
+            )
+
+        if len(_qplot_indices) > 0 and len(_qplot_top_clusters) > 0:
+            try:
+                _qplot_mean_expr = compute_cluster_mean_expression(
+                    adata, _qplot_indices, annotation_col,
+                    min_cells=min_cells_per_cluster,
+                    indices_in_raw=_adata_has_raw,
+                    normalize=True,
+                )
+                _qplot_frac_expr = compute_fraction_expressing(
+                    adata, _qplot_indices, annotation_col,
+                    min_cells=min_cells_per_cluster,
+                    indices_in_raw=_adata_has_raw,
+                )
+            except Exception as e:
+                logger.exception("QPLOT mean/fraction expression failed")
+                st.warning(f"Could not compute QPLOT cluster expression: {e}")
+                _qplot_mean_expr = pd.DataFrame()
+                _qplot_frac_expr = pd.DataFrame()
+
+            if not _qplot_mean_expr.empty and not _qplot_frac_expr.empty:
+                st.markdown(
+                    f"**QPLOT dot plot.** Rows = QPLOT markers; columns = "
+                    f"top **{len(_qplot_top_clusters)}** HypoMap clusters by mean "
+                    f"AUCell. Dot **size** = fraction of cells in the cluster "
+                    f"expressing the gene; dot **colour** = mean log-normalised "
+                    f"expression. Strong concordance between the bacTRAP-ranked "
+                    f"clusters (left) and the canonical QPLOT markers indicates "
+                    f"the IP captured the QPLOT population rather than a "
+                    f"different *Pnoc*⁺ subset."
+                )
+                fig_qplot_dot = figure_dotplot(
+                    _qplot_mean_expr, _qplot_frac_expr,
+                    top_genes=_qplot_resolved,
+                    top_clusters=_qplot_top_clusters,
+                    double_column=double_column,
+                    title="QPLOT markers across top-AUCell HypoMap clusters",
+                )
+                st.pyplot(fig_qplot_dot)
+                _cache_fig("fig_qplot_dotplot", fig_qplot_dot)
+
+                col_pdf, col_svg = st.columns(2)
+                with col_pdf:
+                    st.download_button(
+                        "Download PDF",
+                        st.session_state.fig_bytes["fig_qplot_dotplot"]["pdf"],
+                        "fig_qplot_dotplot.pdf", "application/pdf",
+                        key="dl_fig_qplot_dot_pdf",
+                    )
+                with col_svg:
+                    st.download_button(
+                        "Download SVG",
+                        st.session_state.fig_bytes["fig_qplot_dotplot"]["svg"],
+                        "fig_qplot_dotplot.svg", "image/svg+xml",
+                        key="dl_fig_qplot_dot_svg",
+                    )
+                plt.close(fig_qplot_dot)
+
+        # --- Per-cell QPLOT co-expression in the high-AUCell pool ---------
+        _qplot_top_quantile = st.slider(
+            "QPLOT high-AUCell pool: top quantile of cells",
+            min_value=0.01, max_value=0.25, value=0.10, step=0.01,
+            help=(
+                "Cells with AUCell score in this top fraction of the atlas "
+                "form the 'high-AUCell pool' used for the per-cell "
+                "co-expression heatmap and the pairwise matrix below. "
+                "Tighter quantile = fewer, more bacTRAP-like cells; looser "
+                "= broader pool with more dilution from neighbours."
+            ),
+            key="qplot_top_quantile",
+        )
+
+        try:
+            _qplot_co = compute_qplot_coexpression(
+                adata, QPLOT_EXTENDED_HIGHLIGHTS, aucell_scores,
+                cell_labels=cell_labels,
+                top_quantile=float(_qplot_top_quantile),
+                expr_threshold=0.0,
+                use_raw=True,
+            )
+        except Exception as e:
+            logger.exception("QPLOT co-expression failed")
+            st.warning(f"Could not compute QPLOT co-expression: {e}")
+            _qplot_co = None
+
+        if _qplot_co is not None and not _qplot_co["per_cell_expr"].empty:
+            _high_cell_idx = _qplot_co["high_cell_idx"]
+            _high_aucell = aucell_scores[_high_cell_idx]
+            n_top_pool = int(len(_high_cell_idx))
+
+            st.markdown(
+                f"**QPLOT per-cell heatmap.** {n_top_pool:,} cells with "
+                f"AUCell ≥ **{_qplot_co['threshold_score']:.4f}** "
+                f"(top {_qplot_top_quantile:.0%} of the atlas), grouped by "
+                f"HypoMap cluster (top 10 most-represented clusters in the "
+                f"pool, capped at 200 cells/cluster) and ordered by AUCell "
+                f"score within cluster. Colour = log1p(CP10k) for each "
+                f"QPLOT marker. Visually contiguous yellow bands within a "
+                f"cluster band indicate cluster-internal co-expression."
+            )
+            fig_qplot_heatmap = figure_qplot_coexpression_heatmap(
+                _qplot_co["per_cell_expr"],
+                cluster_labels=_qplot_co["cluster_labels"],
+                aucell_scores_high=_high_aucell,
+                double_column=double_column,
+            )
+            st.pyplot(fig_qplot_heatmap)
+            _cache_fig("fig_qplot_per_cell_heatmap", fig_qplot_heatmap)
+
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_qplot_per_cell_heatmap"]["pdf"],
+                    "fig_qplot_per_cell_heatmap.pdf", "application/pdf",
+                    key="dl_fig_qplot_hm_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_qplot_per_cell_heatmap"]["svg"],
+                    "fig_qplot_per_cell_heatmap.svg", "image/svg+xml",
+                    key="dl_fig_qplot_hm_svg",
+                )
+            plt.close(fig_qplot_heatmap)
+
+            st.markdown(
+                "**Pairwise QPLOT co-expression matrix.** Each cell of the "
+                "matrix = % of high-AUCell cells in which both genes are "
+                "detected (raw count > 0). Diagonal = single-gene detection "
+                "rate in the same pool. Side panel = log₂ fold-enrichment "
+                "of detection in the high-AUCell pool relative to the rest "
+                "of the atlas; positive bars (red) = the marker is more "
+                "frequently detected in bacTRAP-like cells than elsewhere."
+            )
+            fig_qplot_pair = figure_qplot_pairwise_coexpression(
+                _qplot_co["pairwise_coexpr"],
+                frac_in_top=_qplot_co["frac_in_top"],
+                frac_in_bg=_qplot_co["frac_in_bg"],
+                double_column=double_column,
+            )
+            st.pyplot(fig_qplot_pair)
+            _cache_fig("fig_qplot_pairwise", fig_qplot_pair)
+
+            col_pdf, col_svg, col_csv = st.columns(3)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_qplot_pairwise"]["pdf"],
+                    "fig_qplot_pairwise.pdf", "application/pdf",
+                    key="dl_fig_qplot_pair_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_qplot_pairwise"]["svg"],
+                    "fig_qplot_pairwise.svg", "image/svg+xml",
+                    key="dl_fig_qplot_pair_svg",
+                )
+            with col_csv:
+                _qplot_pair_csv = _qplot_co["pairwise_coexpr"].to_csv().encode("utf-8")
+                st.download_button(
+                    "Download CSV (matrix)",
+                    _qplot_pair_csv,
+                    "qplot_pairwise_coexpr.csv", "text/csv",
+                    key="dl_fig_qplot_pair_csv",
+                    help="Symmetric matrix of pairwise co-expression fractions.",
+                )
+            plt.close(fig_qplot_pair)
 
         # Supplementary S3: AUCell Score Histogram (was Figure 1d)
         st.subheader("Supplementary Figure S3: Global AUCell Score Distribution")

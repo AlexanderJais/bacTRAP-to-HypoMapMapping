@@ -415,6 +415,7 @@ def figure_dotplot(
     top_genes: List[str],
     top_clusters: List[str],
     double_column: bool = True,
+    title: str = "bacTRAP-enriched gene expression in top HypoMap clusters",
 ) -> plt.Figure:
     """
     Dot plot: dot size = fraction expressing, dot color = mean expression.
@@ -490,7 +491,7 @@ def figure_dotplot(
     for j in range(n_clusters):
         ax.axvline(j, color="#eeeeee", linewidth=0.3, zorder=0)
 
-    ax.set_title("bacTRAP-enriched gene expression in top HypoMap clusters")
+    ax.set_title(title)
 
     # Colorbar for mean expression
     sm = cm.ScalarMappable(
@@ -512,6 +513,221 @@ def figure_dotplot(
         title="% expressing", loc="upper left", bbox_to_anchor=(1.15, 1.0),
         fontsize=5, title_fontsize=5, frameon=False, handletextpad=0.3,
     )
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# QPLOT marker co-expression in high-AUCell cells
+# ---------------------------------------------------------------------------
+
+def figure_qplot_coexpression_heatmap(
+    per_cell_expr: pd.DataFrame,
+    cluster_labels: Optional[np.ndarray] = None,
+    aucell_scores_high: Optional[np.ndarray] = None,
+    max_clusters_shown: int = 10,
+    max_cells_per_cluster: int = 200,
+    threshold: float = 0.0,
+    double_column: bool = True,
+    title: str = "QPLOT marker expression in high-AUCell cells",
+) -> plt.Figure:
+    """Per-cell heatmap of QPLOT-marker expression, grouped by cluster.
+
+    Rows = cells (high-AUCell pool), columns = QPLOT genes. Cells are
+    ordered first by their HypoMap cluster (top-N clusters by abundance in
+    the high-AUCell pool), then by AUCell score within cluster (descending),
+    so visually contiguous bands of yellow indicate cluster-internal
+    co-expression rather than scattered single-cell hits.
+
+    A coloured band on the left margin marks each cell's cluster of origin.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+    n_genes = per_cell_expr.shape[1]
+    if per_cell_expr.shape[0] == 0 or n_genes == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No high-AUCell cells / markers available",
+                ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    df = per_cell_expr.copy()
+    df = df.reset_index(drop=True)
+
+    if cluster_labels is not None and len(cluster_labels) == len(df):
+        df["_cluster"] = np.asarray(cluster_labels).astype(str)
+    else:
+        df["_cluster"] = "all_high"
+
+    if aucell_scores_high is not None and len(aucell_scores_high) == len(df):
+        df["_aucell"] = np.asarray(aucell_scores_high)
+    else:
+        df["_aucell"] = 0.0
+
+    # Pick top-N clusters by cell count in the high-AUCell pool
+    counts = df["_cluster"].value_counts()
+    top_clusters = counts.head(max_clusters_shown).index.tolist()
+    df = df[df["_cluster"].isin(top_clusters)].copy()
+
+    # Cap cells per cluster (highest AUCell score retained) so a single
+    # huge cluster doesn't drown out the others visually.
+    df = (
+        df.sort_values(["_cluster", "_aucell"], ascending=[True, False])
+        .groupby("_cluster", group_keys=False, sort=False)
+        .head(max_cells_per_cluster)
+    )
+    # Re-sort: cluster order = top_clusters order, AUCell descending within
+    df["_cluster"] = pd.Categorical(df["_cluster"], categories=top_clusters, ordered=True)
+    df = df.sort_values(["_cluster", "_aucell"], ascending=[True, False])
+
+    gene_cols = [c for c in df.columns if c not in ("_cluster", "_aucell")]
+    M = df[gene_cols].values.astype(float)
+    cluster_seq = df["_cluster"].astype(str).values
+    n_cells = M.shape[0]
+
+    height = max(2.5, min(8.0, 0.012 * n_cells + 1.8))
+
+    fig, (ax_band, ax) = plt.subplots(
+        1, 2, figsize=(width, height),
+        gridspec_kw={"width_ratios": [0.04, 1.0], "wspace": 0.02},
+    )
+
+    # Left margin colour band — one colour per cluster
+    palette = sns.color_palette("tab10", n_colors=len(top_clusters))
+    cluster_to_color = {c: palette[i % len(palette)] for i, c in enumerate(top_clusters)}
+    band = np.array([cluster_to_color[c] for c in cluster_seq])
+    ax_band.imshow(
+        band.reshape(n_cells, 1, 3), aspect="auto", interpolation="nearest",
+    )
+    ax_band.set_xticks([])
+    ax_band.set_yticks([])
+    for s in ax_band.spines.values():
+        s.set_visible(False)
+
+    # Main heatmap. Use percentile clipping to suppress outlier saturation.
+    finite = M[np.isfinite(M)]
+    if finite.size > 0:
+        vmin = float(np.nanpercentile(finite, 2))
+        vmax = float(np.nanpercentile(finite, 98))
+        if vmax <= vmin:
+            vmax = vmin + 1e-6
+    else:
+        vmin, vmax = 0.0, 1.0
+
+    im = ax.imshow(
+        M, aspect="auto", cmap="magma", vmin=vmin, vmax=vmax,
+        interpolation="nearest",
+    )
+    ax.set_xticks(range(len(gene_cols)))
+    ax.set_xticklabels(gene_cols, rotation=45, ha="right", fontsize=6)
+    ax.set_yticks([])
+    ax.set_ylabel(f"{n_cells} high-AUCell cells (grouped by cluster)", fontsize=6)
+    ax.set_title(title, fontsize=8)
+
+    # Cluster-band legend (cluster name + n cells shown)
+    handles = [
+        plt.Line2D([0], [0], marker="s", linestyle="", markerfacecolor=cluster_to_color[c],
+                   markeredgecolor="none", markersize=5,
+                   label=f"{c} (n={int((cluster_seq == c).sum())})")
+        for c in top_clusters
+    ]
+    ax.legend(
+        handles=handles, title="Cluster", loc="upper left",
+        bbox_to_anchor=(1.02, 1.0), fontsize=5, title_fontsize=5,
+        frameon=False, handletextpad=0.3,
+    )
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.5, aspect=15, pad=0.18)
+    cbar.set_label("log1p(CP10k)", fontsize=6)
+    cbar.ax.tick_params(labelsize=5)
+
+    return fig
+
+
+def figure_qplot_pairwise_coexpression(
+    pairwise_coexpr: pd.DataFrame,
+    frac_in_top: Optional[pd.Series] = None,
+    frac_in_bg: Optional[pd.Series] = None,
+    double_column: bool = False,
+    title: str = "Pairwise QPLOT-marker co-expression in high-AUCell cells",
+) -> plt.Figure:
+    """Symmetric heatmap of pairwise marker co-expression fractions.
+
+    Cell *i, j* of the matrix is the fraction of high-AUCell cells in which
+    *both* gene *i* and gene *j* are detected (> 0). Diagonal entries equal
+    each gene's individual detection fraction in the same pool.
+
+    When ``frac_in_bg`` is provided, an annotated side panel shows the
+    fold-enrichment of detection in the high-AUCell pool relative to the
+    rest of the atlas — a quick check that markers are actually enriched
+    in the bacTRAP-defined pool rather than ubiquitously expressed.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+    if pairwise_coexpr.empty:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+        return fig
+
+    show_fold = frac_in_top is not None and frac_in_bg is not None
+    if show_fold:
+        fig, (ax, ax_fold) = plt.subplots(
+            1, 2, figsize=(width, max(3.0, width * 0.55)),
+            gridspec_kw={"width_ratios": [1.0, 0.35], "wspace": 0.6},
+        )
+    else:
+        fig, ax = plt.subplots(figsize=(width, max(3.0, width * 0.7)))
+
+    M = pairwise_coexpr.values.astype(float)
+    genes = list(pairwise_coexpr.index)
+    n = len(genes)
+
+    im = ax.imshow(M, cmap="viridis", vmin=0.0, vmax=max(0.01, float(np.nanmax(M))))
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(genes, rotation=45, ha="right", fontsize=6)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(genes, fontsize=6)
+    ax.set_title(title, fontsize=8)
+
+    # Annotate each cell with the fraction (% form). Choose text colour for
+    # contrast against the cell value.
+    threshold = 0.5 * float(np.nanmax(M)) if np.isfinite(np.nanmax(M)) else 0.5
+    for i in range(n):
+        for j in range(n):
+            v = M[i, j]
+            if not np.isfinite(v):
+                continue
+            ax.text(
+                j, i, f"{v * 100:.0f}",
+                ha="center", va="center", fontsize=5,
+                color="white" if v < threshold else "black",
+            )
+
+    cbar = fig.colorbar(im, ax=ax, shrink=0.6, aspect=15, pad=0.04)
+    cbar.set_label("% co-expressing", fontsize=6)
+    cbar.ax.tick_params(labelsize=5)
+    cbar.formatter = plt.FuncFormatter(lambda x, _: f"{x * 100:.0f}")
+    cbar.update_ticks()
+
+    if show_fold:
+        common = [g for g in genes if g in frac_in_top.index and g in frac_in_bg.index]
+        top_v = frac_in_top.loc[common].astype(float).values
+        bg_v = frac_in_bg.loc[common].astype(float).values
+        # log2 fold-change of detection rate; guard against zero background
+        eps = 1e-4
+        fold = np.log2((top_v + eps) / (bg_v + eps))
+
+        y = np.arange(len(common))
+        colors = ["#d62728" if f > 0 else "#4575b4" for f in fold]
+        ax_fold.barh(y, fold, color=colors, edgecolor="none")
+        ax_fold.axvline(0, color="black", linewidth=0.5)
+        ax_fold.set_yticks(y)
+        ax_fold.set_yticklabels(common, fontsize=6)
+        ax_fold.invert_yaxis()
+        ax_fold.set_xlabel(r"$\log_2$(detection rate, top / rest)", fontsize=6)
+        ax_fold.set_title("Enrichment in high-AUCell pool", fontsize=7)
+        for s in ("top", "right"):
+            ax_fold.spines[s].set_visible(False)
+        ax_fold.tick_params(axis="x", labelsize=5)
 
     return fig
 

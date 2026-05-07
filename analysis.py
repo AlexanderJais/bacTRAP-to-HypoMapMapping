@@ -26,6 +26,9 @@ from data_loading import (
     _build_adata_gene_lookup,
     _looks_like_ensembl,
     _find_symbol_column,
+    _extract_gene_submatrix,
+    _get_total_counts_per_cell,
+    _looks_like_raw_counts,
 )
 
 
@@ -1436,3 +1439,159 @@ def compute_composite_ranking(
     df = pd.DataFrame(rows)
     df = df.sort_values("composite_score", ascending=False).reset_index(drop=True)
     return df
+
+
+# ---------------------------------------------------------------------------
+# QPLOT marker co-expression
+# ---------------------------------------------------------------------------
+
+def compute_qplot_coexpression(
+    adata,
+    gene_names: List[str],
+    aucell_scores: np.ndarray,
+    cell_labels: Optional[np.ndarray] = None,
+    top_quantile: float = 0.10,
+    expr_threshold: float = 0.0,
+    use_raw: bool = True,
+    target_sum: float = 1e4,
+) -> Dict:
+    """Per-cell QPLOT-marker co-expression in the high-AUCell cell pool.
+
+    Selects cells whose AUCell score lies in the top ``top_quantile`` of the
+    atlas (default 10%), extracts log-normalised expression for the supplied
+    marker genes, and returns:
+
+      - per-cell expression DataFrame (n_high_cells x n_genes_resolved),
+        log1p(normalize_total(target_sum=target_sum)) when the source layer
+        looks like counts, else passed through.
+      - pairwise co-expression fraction matrix: for every (gene_i, gene_j)
+        the fraction of high-AUCell cells with both > ``expr_threshold``.
+      - per-gene fraction expressing in the high-AUCell pool (diagonal).
+      - per-gene fraction expressing in the rest of the atlas (background)
+        for context.
+      - cluster labels for the high-AUCell cells (when ``cell_labels``
+        is provided), enabling cluster-grouped row sorting in heatmaps.
+
+    Returns a dict with keys ``per_cell_expr`` (DataFrame, cells x genes),
+    ``pairwise_coexpr`` (DataFrame, genes x genes, fraction co-expressing),
+    ``frac_in_top`` (Series, gene -> fraction expressing in the top pool),
+    ``frac_in_bg`` (Series, gene -> fraction expressing in the rest),
+    ``high_cell_idx`` (np.ndarray of cell row indices), ``cluster_labels``
+    (np.ndarray, len = n_high_cells, only when input cell_labels given),
+    ``threshold_score`` (float, AUCell cutoff used), and ``unmatched``
+    (list[str], gene names not resolvable in the atlas lookup).
+    """
+    if not (0.0 < top_quantile < 1.0):
+        raise ValueError(f"top_quantile must be in (0, 1), got {top_quantile}")
+
+    scores = np.asarray(aucell_scores, dtype=np.float64)
+    if scores.shape[0] != adata.n_obs:
+        raise ValueError(
+            f"aucell_scores length ({scores.shape[0]}) does not match "
+            f"adata.n_obs ({adata.n_obs})"
+        )
+
+    # ---- Resolve gene names against the same lookup used everywhere else --
+    lookup, _src_names, is_raw_lookup = _build_adata_gene_lookup(
+        adata, use_raw=use_raw,
+    )
+    resolved_names: List[str] = []
+    resolved_idx: List[int] = []
+    unmatched: List[str] = []
+    for g in gene_names:
+        key = str(g).strip().lower()
+        if key in lookup:
+            display, idx = lookup[key]
+            resolved_names.append(display)
+            resolved_idx.append(int(idx))
+        else:
+            unmatched.append(str(g))
+    if unmatched:
+        logger.warning(
+            "compute_qplot_coexpression: %d/%d marker genes not found in "
+            "atlas lookup: %s", len(unmatched), len(gene_names), unmatched,
+        )
+
+    # ---- Top-quantile AUCell cutoff (cells at or above the cutoff) --------
+    cutoff = float(np.quantile(scores, 1.0 - top_quantile))
+    high_mask = scores >= cutoff
+    n_high = int(high_mask.sum())
+    logger.info(
+        "compute_qplot_coexpression: top_quantile=%.3f, cutoff=%.4f, "
+        "n_high_cells=%d / %d", top_quantile, cutoff, n_high, scores.shape[0],
+    )
+
+    if len(resolved_idx) == 0 or n_high == 0:
+        empty_df = pd.DataFrame(index=range(n_high), columns=resolved_names, dtype=float)
+        empty_pair = pd.DataFrame(index=resolved_names, columns=resolved_names, dtype=float)
+        return {
+            "per_cell_expr": empty_df,
+            "pairwise_coexpr": empty_pair,
+            "frac_in_top": pd.Series(dtype=float),
+            "frac_in_bg": pd.Series(dtype=float),
+            "high_cell_idx": np.where(high_mask)[0],
+            "cluster_labels": (
+                np.asarray(cell_labels)[high_mask] if cell_labels is not None else None
+            ),
+            "threshold_score": cutoff,
+            "unmatched": unmatched,
+        }
+
+    # ---- Extract (n_cells x n_genes) submatrix for the marker set ---------
+    X_genes, survived_mask = _extract_gene_submatrix(
+        adata, np.array(resolved_idx, dtype=int),
+        use_raw=is_raw_lookup, indices_in_raw=is_raw_lookup,
+    )
+    survived_names = [n for n, ok in zip(resolved_names, survived_mask) if ok]
+
+    # ---- Normalise to log1p(CP10k) when input looks like raw counts -------
+    if X_genes.size > 0 and _looks_like_raw_counts(X_genes):
+        totals = _get_total_counts_per_cell(adata, use_raw=is_raw_lookup)
+        safe_totals = np.where(totals > 0, totals, 1.0).astype(np.float32)
+        scale = (target_sum / safe_totals).astype(np.float32)
+        X_genes = X_genes.astype(np.float32, copy=False) * scale[:, None]
+        np.log1p(X_genes, out=X_genes)
+        logger.info("  applied normalize_total(target=%.0f) + log1p", target_sum)
+
+    # ---- Slice to high-AUCell cells --------------------------------------
+    X_high = X_genes[high_mask, :]
+    per_cell_expr = pd.DataFrame(
+        X_high, columns=survived_names,
+    )
+
+    # Per-gene fraction expressing (> threshold) in high pool and background
+    frac_in_top = pd.Series(
+        (X_high > expr_threshold).mean(axis=0), index=survived_names,
+    )
+    bg_mask = ~high_mask
+    if bg_mask.any():
+        X_bg = X_genes[bg_mask, :]
+        frac_in_bg = pd.Series(
+            (X_bg > expr_threshold).mean(axis=0), index=survived_names,
+        )
+    else:
+        frac_in_bg = pd.Series(np.nan, index=survived_names)
+
+    # ---- Pairwise co-expression in the top pool --------------------------
+    expressed = (X_high > expr_threshold).astype(np.float32)
+    n_high_eff = max(expressed.shape[0], 1)
+    pair_counts = expressed.T @ expressed  # (n_genes x n_genes), counts
+    pairwise_coexpr = pd.DataFrame(
+        pair_counts / n_high_eff,
+        index=survived_names, columns=survived_names,
+    )
+
+    cluster_lbl = (
+        np.asarray(cell_labels)[high_mask] if cell_labels is not None else None
+    )
+
+    return {
+        "per_cell_expr": per_cell_expr,
+        "pairwise_coexpr": pairwise_coexpr,
+        "frac_in_top": frac_in_top,
+        "frac_in_bg": frac_in_bg,
+        "high_cell_idx": np.where(high_mask)[0],
+        "cluster_labels": cluster_lbl,
+        "threshold_score": cutoff,
+        "unmatched": unmatched,
+    }
