@@ -1653,9 +1653,9 @@ if run_button or st.session_state.analysis_done:
         # Resolve QPLOT genes against the same atlas lookup used elsewhere
         # so we get the actual stored symbols (handles capitalisation /
         # alias drift).
-        _qplot_indices: List[int] = []
-        _qplot_resolved: List[str] = []
-        _qplot_unmatched: List[str] = []
+        _qplot_indices = []
+        _qplot_resolved = []
+        _qplot_unmatched = []
         for _g in QPLOT_EXTENDED_HIGHLIGHTS:
             _key = str(_g).strip().lower()
             if _key in _adata_lookup:
