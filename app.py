@@ -1061,7 +1061,9 @@ if run_button or st.session_state.analysis_done:
             progress.progress(83, text=f"Empirical null: 0/{int(empirical_null_n)} control sets...")
 
             def _null_progress(i, n, _p=progress):
-                _p.progress(min(83 + int(11 * i / max(n, 1)), 94),
+                # map control-set i∈[1, n] onto progress 83..93 so the bar
+                # stays monotone with the composite (94) / figures (95) steps
+                _p.progress(min(83 + int(10 * i / max(n, 1)), 93),
                             text=f"Empirical null: {i}/{n} control sets scored...")
 
             try:
@@ -1090,8 +1092,15 @@ if run_button or st.session_state.analysis_done:
                 aucell_per_cluster_df = aucell_per_cluster_df.merge(
                     _null_cols, on="cluster", how="left",
                 )
+                # Clusters below the size gate get no empirical-null row; the
+                # left-merge leaves NaN there. Keep the count an integer (0 =
+                # "not evaluated for this cluster") rather than a float-with-NaN.
+                if "n_control_sets_used" in aucell_per_cluster_df.columns:
+                    aucell_per_cluster_df["n_control_sets_used"] = (
+                        aucell_per_cluster_df["n_control_sets_used"].fillna(0).astype(int)
+                    )
 
-        progress.progress(85, text="Computing composite ranking...")
+        progress.progress(94, text="Computing composite ranking...")
 
         # ---- Composite ranking ----
         composite_df = compute_composite_ranking(

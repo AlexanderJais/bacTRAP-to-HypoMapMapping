@@ -1330,7 +1330,11 @@ def figure_aucell_zscore_violins(
     )
     cmap = plt.colormaps["viridis"]
     zvals = z.loc[top_clusters].to_numpy()
-    norm = Normalize(vmin=float(np.nanmin(zvals)), vmax=float(np.nanmax(zvals)) or 1.0)
+    _zmin = float(np.nanmin(zvals))
+    _zmax = float(np.nanmax(zvals))
+    if not np.isfinite(_zmin) or not np.isfinite(_zmax) or _zmax <= _zmin:
+        _zmax = _zmin + 1.0
+    norm = Normalize(vmin=_zmin, vmax=_zmax)
     for i, body in enumerate(parts["bodies"]):
         body.set_facecolor(cmap(norm(zvals[i])))
         body.set_alpha(0.7)
