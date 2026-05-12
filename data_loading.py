@@ -912,58 +912,87 @@ def get_atlas_gene_detection_rate(
     return s
 
 
-def get_neuronal_cell_mask(adata, c7_column: str = "C7_named") -> pd.Series:
-    """Boolean mask of cells belonging to neuronal C7 classes.
+def build_mask_signature(poa_keywords, include_na: bool) -> str:
+    """Deterministic suffix used in cache keys and CSV filenames for the
+    POA-only atlas restriction.
 
-    Neuronal vs non-neuronal is decided by case-insensitive substring match
-    of the C7 (or, as a fallback, C25) class label against a list of known
-    non-neuronal class strings (``immune``, ``oligo``, ``astro``,
-    ``ependymal``, ``endothelial``, ``mural``, ``fibroblast``, ``pars``,
-    ``pineal``, ``tanycyte``, ``microglia``, ``erythroid``).  Cells whose
-    label matches any of these substrings are **excluded**; everything else
-    is kept.
-
-    If neither ``C7_named`` nor ``C25_named`` is present, a warning is logged
-    and an all-True mask is returned (no filter applied).
-
-    Returns a ``pd.Series`` indexed by ``adata.obs_names`` with dtype bool.
+    ``build_mask_signature(("preoptic",), True)`` → ``"poaonly_preoptic_na"``.
     """
-    _NON_NEURONAL = (
-        "immune", "oligo", "astro", "ependymal", "endothelial", "mural",
-        "fibroblast", "pars", "pineal", "tanycyte", "microglia", "erythroid",
-    )
-    col = None
-    for candidate in (c7_column, "C25_named"):
-        if candidate in adata.obs.columns:
-            col = candidate
-            break
-    if col is None:
-        logger.warning(
-            "get_neuronal_cell_mask: neither '%s' nor 'C25_named' present in "
-            "adata.obs (columns: %s) — returning all-True mask (no filter).",
-            c7_column, list(adata.obs.columns),
-        )
-        return pd.Series(True, index=adata.obs_names, dtype=bool)
+    parts = ["poaonly"] + sorted(str(kw).strip().lower() for kw in poa_keywords if str(kw).strip())
+    if include_na:
+        parts.append("na")
+    return "_".join(parts)
 
-    labels = adata.obs[col].astype(str)
-    lowered = labels.str.lower()
-    non_neuronal_mask = pd.Series(False, index=adata.obs_names)
-    for token in _NON_NEURONAL:
-        non_neuronal_mask |= lowered.str.contains(token, regex=False, na=False)
-    keep = ~non_neuronal_mask
+
+def get_poa_cell_mask(
+    adata,
+    *,
+    region_col: str = "Region_summarized",
+    poa_keywords=("preoptic",),
+    include_na: bool = True,
+    logger=None,
+) -> pd.Series:
+    """Boolean mask of POA-compatible cells.
+
+    A cell is ``True`` iff either its ``region_col`` value is missing (NaN) and
+    ``include_na`` is True, or any keyword (case-insensitive) appears as a
+    substring of its ``region_col`` value.  Matches the per-cell methodology of
+    HypoMap Table S1 ("Pnoc means computed within POA cells"); ``include_na``
+    defaults to True so clusters with no regional assignment (e.g. the highest-
+    Pnoc S1 cluster `C185-67: Pnoc.Mixed.GABA-2`, 100 % NA) are retained.
+
+    Raises
+    ------
+    KeyError if ``region_col`` is absent from ``adata.obs`` (the message lists
+    the available columns whose name starts with "region", to help the caller).
+
+    Returns
+    -------
+    pd.Series, dtype=bool, indexed by ``adata.obs_names``.
+    """
+    log = logger or logging.getLogger(__name__)
+    keywords = tuple(str(kw).strip().lower() for kw in poa_keywords if str(kw).strip())
+    if region_col not in adata.obs.columns:
+        region_like = [c for c in adata.obs.columns if "region" in str(c).lower()]
+        raise KeyError(
+            f"Region column '{region_col}' not found in adata.obs. "
+            f"Columns containing 'region': {region_like or '(none)'}. "
+            f"All columns: {list(adata.obs.columns)}"
+        )
+
+    raw = adata.obs[region_col]
+    na_mask = raw.isna()
+    text = raw.astype(str)
+    # treat the string forms of missing values as NA too (h5ad round-trips can
+    # turn NaN/None into the literal strings "nan"/"None"/"NA"/"")
+    na_mask = na_mask | text.str.strip().str.lower().isin({"nan", "none", "na", ""})
+    lowered = text.str.lower()
+    keyword_hit = pd.Series(False, index=raw.index)
+    for kw in keywords:
+        keyword_hit = keyword_hit | lowered.str.contains(kw, regex=False, na=False)
+    # a string-NA cell shouldn't also count as a keyword hit
+    keyword_hit = keyword_hit & ~na_mask
+
+    keep = keyword_hit | (na_mask if include_na else pd.Series(False, index=raw.index))
     keep.index = adata.obs_names
+    keep = keep.astype(bool)
 
     n_total = int(len(keep))
     n_keep = int(keep.sum())
-    # Per-non-neuronal-class breakdown for the log
-    dropped_labels = labels[non_neuronal_mask.values]
-    breakdown = dropped_labels.value_counts().to_dict() if len(dropped_labels) else {}
-    logger.info(
-        "get_neuronal_cell_mask: column='%s', total=%d, kept (neuronal)=%d, "
-        "dropped (non-neuronal)=%d. Dropped per class: %s",
-        col, n_total, n_keep, n_total - n_keep, breakdown,
+    n_kw = int(keyword_hit.sum())
+    n_na = int((na_mask & keep.values).sum())
+    retained_breakdown = (
+        text[keep.values].value_counts().head(5).to_dict() if n_keep else {}
     )
-    return keep.astype(bool)
+    excluded_breakdown = (
+        text[~keep.values].value_counts().head(5).to_dict() if (n_total - n_keep) else {}
+    )
+    log.info("POA restriction: keywords=%s, include_na=%s", list(keywords), include_na)
+    log.info("POA mask: N_poa = %d of %d cells (%.1f%%) — %d keyword matches + %d NA-included",
+             n_keep, n_total, 100.0 * n_keep / max(n_total, 1), n_kw, n_na)
+    log.info("Region breakdown of POA-compatible cells (top 5): %s", retained_breakdown)
+    log.info("Region breakdown of EXCLUDED cells (top 5): %s", excluded_breakdown)
+    return keep
 
 
 def compute_single_gene_cluster_stats(
