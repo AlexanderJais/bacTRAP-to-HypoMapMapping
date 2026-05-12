@@ -77,6 +77,17 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 | Min cells for AUCell top-N ranking | Cluster-size floor for the top-N figures (main 1b/1c + supplementary S2). Excludes small clusters whose mean is dominated by shrinkage variance | 20 |
 | Markers per cluster | Number of marker genes per cluster for the Fisher/GSEA overlap tests | 100 |
 | Min cells per cluster | Minimum cells required to include a cluster in marker analysis | 10 |
+| Restrict to neurons only | When checked, every cluster-level analysis (correlation, Fisher, NNLS, GSEA, AUCell cluster aggregation, Cre-driver sanity, composite, heatmap, dot plot, empirical null) runs over a neuronal-cell subset of the atlas (non-neuronal C7 classes — immune, oligo, astro, ependymal, endothelial, pars tuberalis, etc. — excluded). The per-cell AUCell UMAP (Fig 1a) still shows all cells. Recommended for bacTRAP from a neuronal Cre line | OFF |
+| Filter signature by HypoMap detectability | *(Signature refinement)* Drop candidate signature genes that are undetectable in the atlas (cell detection rate below the floor, OR max per-cluster mean log-norm expression below the floor) before π-score ranking / top-N selection | ON |
+| Min cell detection rate | Detectability floor: minimum fraction of atlas cells with a non-zero count for the gene | 0.02 |
+| Min max-cluster-mean expression | Detectability floor: minimum value of the gene's largest per-cluster mean log-norm expression | 0.05 |
+| Filter signature for cluster specificity | *(Signature refinement)* Drop signature genes expressed broadly across clusters (per-cluster mean log-norm expression above the threshold below in more than the fraction below) — operational proxy for "pan-neuronal, not cell-type-specific" | ON |
+| Specificity: cluster mean threshold | Per-cluster mean log-norm expression above which a cluster counts as "expressing" the gene | 0.5 |
+| Specificity: max cluster fraction | Drop the gene if more than this fraction of clusters exceed the threshold above | 0.5 |
+| Compute empirical-null z-scores | *(Empirical null)* Score N expression-matched random control gene sets with AUCell and report, per cluster, a z-score and one-sided empirical p/q-value of the bacTRAP-signature mean relative to the control distribution (Aibar et al. 2017). Adds `null_mean / null_sd / z_empirical / pvalue_empirical / qvalue_empirical` columns to `aucell_per_cluster.csv` and a companion violin panel below Fig 1c | ON |
+| Control sets (N) | Number of expression-matched control gene sets — more → tighter null but slower (500 is the AUCell paper default) | 100 |
+| Expression bins | Number of atlas-wide expression-quantile bins used to match control genes to the signature | 5 |
+| Random seed | Seed for the control-set sampling RNG and the AUCell tie-breaking jitter (reproducible) | 0 |
 | UMAP subsample | Number of cells to subsample for UMAP rendering (scoring uses all cells) | 50,000 |
 | Cre-driver gene | Gene used for the Cre-driver Check sanity panel and the baseline filter below | `Pnoc` |
 | Expression threshold (fraction) | Display-only: min fraction of cells expressing the Cre-driver gene to flag a cluster as "expressing" in the sanity table; does **not** change any ranking | 0.05 |
@@ -87,8 +98,8 @@ The app inspects `.obs` columns on load and lets you select which annotation lev
 
 | Tab | Contents |
 |---|---|
-| **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, bacTRAP volcano plot, gene matching diagnostics |
-| **AUCell (Main Figure)** | Main **Figure 1a–c** (AUCell UMAP, cell-type UMAP with top-15 clusters highlighted, violin distributions) plus supplementary panels S2/S3/S11 (per-cluster barplot, global histogram, composite consensus ranking) |
+| **Data Overview** | Gene/cell/cluster counts, match rate, enriched gene list, **signature refinement diagnostics** (per-gene drop log), bacTRAP volcano plot, gene matching diagnostics |
+| **AUCell (Main Figure)** | Main **Figure 1a–c** (AUCell UMAP, cell-type UMAP with top-15 clusters highlighted, violin distributions) plus, when the empirical null is enabled, a **companion violin panel** ranked by empirical z-score; plus supplementary panels S2/S3/S11 (per-cluster barplot, global histogram, composite consensus ranking) |
 | **Cre-driver Check** | Sanity check + optional baseline filter. Per-cluster expression of the Cre-driver gene (default `Pnoc`) across the top-ranked clusters from the composite consensus, with a configurable "fraction expressing" threshold that highlights (but does not drop) suspicious hits. The sidebar's "Baseline Cre-driver mean expression" slider additionally enforces a minimum expression floor that feeds back into every cluster-level ranking (correlation, Fisher, NNLS, GSEA, composite, AUCell); filtered CSV exports are suffixed with the filter signature (e.g. `composite_ranking_pnoc_ge0p05.csv`) |
 | **Correlation (Suppl.)** | Ranked cluster table + correlation barplot (Supplementary Figure S1) |
 | **UMAP Projection (Suppl.)** | Two-panel UMAP: cell-type annotation + AUCell score, side-by-side (Supplementary Figure S4) |
@@ -172,6 +183,30 @@ Two related knobs that share the Cre-driver gene set via the sidebar:
 - **Edge cases:** if the Cre-driver gene is absent from the atlas, or the threshold discards every cluster, the filter is disabled and a persistent warning/error banner is rendered above the tab group; all tabs revert to unfiltered behaviour and CSV filenames are the default.
 - **Filenames of filtered exports** are suffixed with the filter signature (e.g. `correlation_results_pnoc_ge0p05.csv`) so a collaborator opening a trimmed table from the Export tab can tell at a glance that it's a subset, not the full atlas.
 - **Output:** diagnostic barplot of fraction-expressing per cluster with the user-defined threshold marked, plus a per-cluster sanity table and CSV; when the baseline filter is active, every ranking-related tab acts on the restricted cluster universe.
+
+### 10. Signature Refinement (default ON)
+
+Before π-score ranking and top-N selection, the candidate signature (the genes that already passed the padj / log₂FC / min-IP filters) is run through two atlas-based filters; the kept list flows into AUCell and every other downstream method:
+
+- **HypoMap detectability.** Drop genes essentially absent from the atlas — fraction of cells expressing the gene below the *Min cell detection rate* floor (default 0.02), OR maximum per-cluster mean log-norm expression below the *Min max-cluster-mean expression* floor (default 0.05). A gene that never lands in any cell's top-τ window cannot contribute to AUCell and only adds noise.
+- **Specificity.** Drop genes expressed broadly across clusters — per-cluster mean log-norm expression above the *Specificity: cluster mean threshold* (default 0.5) in more than the *Specificity: max cluster fraction* (default 0.5) of clusters. Pan-neuronal genes (*Snap25, Syt1, Stmn2, Tubb3, Map2*) are enriched in any neuronal IP but carry no cell-type specificity; "expressed broadly across clusters" is a clean operational proxy that needs no curated list.
+
+Both filters reuse the per-cluster mean expression already computed for the matched gene set; the per-gene drop log (gene, drop reason, statistics, kept-vs-dropped counts) appears in the **Signature refinement diagnostics** expander on the Data Overview tab and is downloadable as `signature_refinement_log.csv`. Disable either filter from the sidebar to return to the pre-change candidate set.
+
+### 11. Neuronal-only Atlas Mask (default OFF)
+
+A single sidebar checkbox (*Restrict to neurons only*) restricts every cluster-level computation — cluster means, marker stats, correlation, Fisher, NNLS, GSEA, AUCell cluster aggregation, Cre-driver sanity, composite, heatmap, dot plot, empirical null — to a neuronal-cell subset of the atlas. Neuronal vs non-neuronal is decided by a case-insensitive substring match of the `C7_named` (or `C25_named` fallback) class label against a list of non-neuronal class strings (*immune, oligo, astro, ependymal, endothelial, mural, fibroblast, pars, pineal, tanycyte, microglia, erythroid*); cells matching any of these are excluded. The original atlas object is kept untouched in cache; a neuronal-cell copy is built once and reused. Per-cell AUCell scoring, the per-cell UMAP (Fig 1a) and `aucell_per_cell.csv` keep the full atlas. When neither `C7_named` nor `C25_named` exists, the mask is a no-op and a warning is shown.
+
+### 12. Empirical-null AUCell (default ON)
+
+For each cluster, in addition to the mean AUCell of the signature, an empirical null is reported relative to expression-matched random control gene sets (Aibar et al., *Nat. Methods* 2017):
+
+1. Atlas-wide mean expression per gene is computed once and cached on `adata.uns['gene_mean_expr']`; genes are binned by expression quantile (default 5 bins).
+2. For each of *N* control sets (default 100), one gene is sampled uniformly from the same expression bin as each signature gene, excluding the signature genes themselves; the RNG is seeded for reproducibility.
+3. All N control sets are scored with the existing AUCell algorithm in a single batched pass over the atlas — the expensive per-cell ranking (jitter + partition + sort) is computed once and shared across control sets, so the empirical null costs ~2 AUCell passes rather than N+1 — using the same tie-breaking seed as the signature, then aggregated to per-cluster means.
+4. Per cluster: `null_mean` and `null_sd` (mean / SD of the N control per-cluster means), `z_empirical = (signature mean − null_mean) / null_sd`, `pvalue_empirical = (1 + #{controls ≥ signature}) / (N + 1)` (one-sided, add-1 smoothing), and a Benjamini–Hochberg `qvalue_empirical` across clusters.
+
+These five columns (plus `n_control_sets_used`) are appended to `aucell_per_cluster.csv` only when the empirical null is enabled. The AUCell tab gains a companion violin panel showing the top 15 clusters ranked by `z_empirical` (titled "Top 15 by empirical z-score (matched-expression null)"); Figures 1a and 1b are unchanged. Enabling the null appends a `_nullN{N}` segment to filtered CSV filenames. This is the standard fix for the "baseline gene-rank-width" bias that inflates AUCell scores in broadly-active neuronal clusters.
 
 ---
 
@@ -355,3 +390,17 @@ The tool applies five complementary approaches (correlation, Fisher's overlap, N
 - Love, M. I., Huber, W. & Anders, S. Moderated estimation of fold change and dispersion for RNA-seq data with DESeq2. *Genome Biology* **15**, 550 (2014).
 - Wolf, F. A., Angerer, P. & Theis, F. J. SCANPY: large-scale single-cell gene expression data analysis. *Genome Biology* **19**, 15 (2018).
 - Xiao, Y. et al. A novel significance score for gene selection and ranking. *Bioinformatics* **30**, 801--807 (2014).
+
+---
+
+## Changelog
+
+### AUCell false-positive reduction
+
+Three changes were added to reduce AUCell-based false positives in the bacTRAP→HypoMap mapping. **Two are ON by default, so the AUCell ranking with default settings now differs from pre-change runs:**
+
+1. **Empirical-null AUCell** (default ON, N = 100). Adds `null_mean`, `null_sd`, `z_empirical`, `pvalue_empirical`, `qvalue_empirical` columns to `aucell_per_cluster.csv` and a companion violin panel ranked by `z_empirical`. Does not change Fig 1a/1b or the existing mean-ranked Fig 1c.
+2. **Signature refinement filters** (default ON). The candidate signature is filtered for HypoMap detectability and cluster specificity before π-score ranking, so the top-N signature — and therefore AUCell and every other downstream method — may include different genes than before.
+3. **Neuronal-only atlas mask** (default OFF, opt-in). No effect unless enabled.
+
+**To reproduce the exact pre-change behaviour:** turn off *Compute empirical-null z-scores*, turn off *Filter signature by HypoMap detectability*, and turn off *Filter signature for cluster specificity* (leave *Restrict to neurons only* off). With those three unchecked, the pipeline returns to its earlier outputs bit-for-bit, and CSV filenames carry no `_neuronal` / `_nullN` suffix. CSV column additions are purely additive — no existing column is renamed or removed.

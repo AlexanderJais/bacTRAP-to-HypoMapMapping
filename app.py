@@ -214,6 +214,94 @@ hide_unassigned = st.sidebar.checkbox(
         "still include all clusters; only the displayed rankings are filtered."
     ),
 )
+restrict_neuronal = st.sidebar.checkbox(
+    "Restrict to neurons only (drop immune/glia/non-neuronal)",
+    value=False,
+    help=(
+        "Recommended for bacTRAP from a neuronal Cre line. Excludes "
+        "microglia, oligodendrocytes, astrocytes, ependymal cells, "
+        "endothelial cells, pars tuberalis pituitary cells, and other "
+        "non-neuronal classes from all cluster-level analyses (correlation, "
+        "Fisher, NNLS, GSEA, AUCell cluster aggregation, sanity check, "
+        "composite, heatmap, dot plot, empirical null). Per-cell UMAP "
+        "(Fig 1a) still shows all cells. Off by default; identified via the "
+        "HypoMap C7_named taxonomy (C25_named fallback)."
+    ),
+)
+
+# ---- Signature refinement (Change 2): drop signature genes that are
+# undetectable in HypoMap or too broadly expressed to be cell-type-specific.
+with st.sidebar.expander("Signature refinement", expanded=False):
+    sig_filter_detectability = st.checkbox(
+        "Filter signature by HypoMap detectability",
+        value=True,
+        help=(
+            "Drop bacTRAP signature genes that are essentially undetectable "
+            "in the atlas — fraction of cells expressing below the floor "
+            "below, OR maximum per-cluster mean log-norm expression below "
+            "the floor below. Such genes never enter any cell's top-τ AUCell "
+            "window and only add noise."
+        ),
+    )
+    sig_min_detection_rate = st.slider(
+        "Min cell detection rate", 0.0, 0.20, 0.02, 0.01, format="%.2f",
+        help="Minimum fraction of atlas cells with a non-zero count for the gene.",
+    )
+    sig_min_max_cluster_mean = st.slider(
+        "Min max-cluster-mean expression", 0.00, 0.50, 0.05, 0.01, format="%.2f",
+        help="Minimum value of the gene's largest per-cluster mean log-norm expression.",
+    )
+    sig_filter_specificity = st.checkbox(
+        "Filter signature for cluster specificity",
+        value=True,
+        help=(
+            "Drop signature genes expressed broadly across clusters "
+            "(pan-neuronal genes like Snap25 / Syt1 / Stmn2 / Tubb3 / Map2 "
+            "are enriched in any neuronal IP but carry no cell-type "
+            "specificity). A gene is dropped if its per-cluster mean "
+            "log-norm expression exceeds the threshold below in more than "
+            "the fraction of clusters below."
+        ),
+    )
+    sig_specificity_thresh = st.slider(
+        "Specificity: cluster mean threshold", 0.1, 2.0, 0.5, 0.1, format="%.1f",
+        help="Per-cluster mean log-norm expression above which a cluster counts as 'expressing' the gene.",
+    )
+    sig_specificity_max_fraction = st.slider(
+        "Specificity: max cluster fraction", 0.1, 1.0, 0.5, 0.05, format="%.2f",
+        help="Drop the gene if more than this fraction of clusters exceed the threshold above.",
+    )
+
+# ---- Empirical-null AUCell (Change 1): score expression-matched random
+# control gene sets and report per-cluster z-score / empirical p-value.
+with st.sidebar.expander("Empirical null", expanded=False):
+    empirical_null_enabled = st.checkbox(
+        "Compute empirical-null z-scores",
+        value=True,
+        help=(
+            "Score N expression-matched random control gene sets with AUCell "
+            "and report, per cluster, a z-score and one-sided empirical "
+            "p-value of the bacTRAP-signature mean relative to the control "
+            "distribution (Aibar et al. 2017). Removes the 'baseline "
+            "gene-rank-width' bias that inflates AUCell in broadly-active "
+            "neuronal clusters. Adds columns to aucell_per_cluster.csv."
+        ),
+    )
+    empirical_null_n = st.slider(
+        "Control sets (N)", 20, 500, 100, 20,
+        help=(
+            "More sets → tighter null estimate but slower. 100 is a "
+            "reasonable compromise; 500 is the AUCell paper default."
+        ),
+    )
+    empirical_null_bins = st.slider(
+        "Expression bins", 3, 10, 5, 1,
+        help="Number of atlas-wide expression-quantile bins used to match control genes to the signature.",
+    )
+    empirical_null_seed = st.number_input(
+        "Random seed", min_value=0, max_value=2**31 - 1, value=0, step=1,
+        help="Seed for the control-set sampling RNG and the AUCell tie-breaking jitter (reproducible).",
+    )
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Cre-driver Sanity Check")
@@ -335,7 +423,9 @@ from data_loading import (
     match_genes,
     compute_cluster_mean_expression,
     compute_fraction_expressing,
+    compute_cell_detection_rate,
     compute_single_gene_cluster_stats,
+    get_neuronal_cell_mask,
     get_gene_names_from_adata,
     _detect_gene_column,
     _build_adata_gene_lookup,
@@ -344,6 +434,7 @@ from data_loading import (
 from analysis import (
     compute_enrichment_correlation,
     get_enriched_genes,
+    filter_signature_genes_by_atlas,
     rank_enriched_genes,
     compute_marker_genes,
     load_precomputed_markers,
@@ -352,6 +443,7 @@ from analysis import (
     compute_nnls_deconvolution,
     compute_gsea_enrichment,
     compute_aucell_scores,
+    compute_empirical_null_aucell,
     validate_aucell_input,
     compute_cluster_enrichment_stats,
     compute_composite_ranking,
@@ -371,6 +463,7 @@ from figures import (
     figure_celltype_umap,
     figure_aucell_cluster_barplot,
     figure_aucell_violins,
+    figure_aucell_zscore_violins,
     figure_aucell_histogram,
     figure_composite_ranking,
     figure_marker_gene_diagnostic,
@@ -436,6 +529,36 @@ annotation_col = st.sidebar.selectbox(
         "hypothalamic neuropeptide signatures."
     ),
 )
+
+# ---- Neuronal-only atlas mask (Change 3) ----
+# Computed once per (atlas file, toggle). When active, every cluster-level
+# analysis runs against a neuronal-cell subset (adata_cl); per-cell scoring
+# and the per-cell UMAP keep the full atlas.
+neuronal_mask = None
+if restrict_neuronal:
+    _nm_arr = get_neuronal_cell_mask(adata).to_numpy(dtype=bool)
+    if not _nm_arr.all():
+        neuronal_mask = _nm_arr
+    else:
+        st.sidebar.caption(
+            ":warning: 'neurons only' is on but no non-neuronal cells were "
+            "identified (C7_named/C25_named missing or all-neuronal) — no filter applied."
+        )
+if neuronal_mask is not None:
+    _adata_cl_key = (hypomap_file.strip(), int(neuronal_mask.sum()))
+    if st.session_state.get("_adata_cl_key") != _adata_cl_key:
+        with st.spinner("Building neuronal-only atlas view..."):
+            st.session_state["_adata_cl"] = adata[neuronal_mask].copy()
+        st.session_state["_adata_cl_key"] = _adata_cl_key
+    adata_cl = st.session_state["_adata_cl"]
+    neuronal_clusters = set(adata_cl.obs[annotation_col].astype(str).unique())
+    st.sidebar.caption(
+        f"Neurons-only: **{int(neuronal_mask.sum()):,}** / {adata.n_obs:,} cells, "
+        f"{len(neuronal_clusters)} clusters at `{annotation_col}`."
+    )
+else:
+    adata_cl = adata
+    neuronal_clusters = None
 
 # Gene column selection for bacTRAP data
 # Build HypoMap lookup once for auto-detection
@@ -531,6 +654,14 @@ _analysis_params = (
     top_n_genes, aucell_top_fraction,
     n_markers_per_cluster, min_cells_per_cluster, marker_method,
     umap_subsample,
+    # Change 3 — neuronal-only atlas mask
+    bool(neuronal_mask is not None),
+    # Change 2 — signature refinement
+    sig_filter_detectability, sig_min_detection_rate, sig_min_max_cluster_mean,
+    sig_filter_specificity, sig_specificity_thresh, sig_specificity_max_fraction,
+    # Change 1 — empirical-null AUCell
+    bool(empirical_null_enabled), int(empirical_null_n), int(empirical_null_bins),
+    int(empirical_null_seed),
 )
 
 if run_button or st.session_state.analysis_done:
@@ -559,6 +690,14 @@ if run_button or st.session_state.analysis_done:
         logger.info("  marker method: %s", marker_method)
         logger.info("  UMAP subsample: %d", umap_subsample)
         logger.info("  hide Unassigned/Mixed: %s", hide_unassigned)
+        logger.info("  restrict to neurons only: %s", restrict_neuronal)
+        logger.info("  signature refinement: detectability=%s (min_det=%.3f, min_max_mean=%.3f), "
+                    "specificity=%s (thresh=%.2f, max_frac=%.2f)",
+                    sig_filter_detectability, sig_min_detection_rate, sig_min_max_cluster_mean,
+                    sig_filter_specificity, sig_specificity_thresh, sig_specificity_max_fraction)
+        logger.info("  empirical null: enabled=%s (N=%d, bins=%d, seed=%d)",
+                    empirical_null_enabled, int(empirical_null_n), int(empirical_null_bins),
+                    int(empirical_null_seed))
         logger.info("  Cre-driver gene: %s", sanity_gene)
         logger.info("  Cre-driver expression fraction threshold: %.2f", sanity_fraction_threshold)
         logger.info("  Cre-driver baseline mean expression (log-norm): %.2f", sanity_baseline_mean_expr)
@@ -601,8 +740,12 @@ if run_button or st.session_state.analysis_done:
         # heuristic samples only the selected genes and can falsely decide
         # the data is already normalized — see the second call below).
         gene_indices = [gene_to_idx[g] for g in matched_genes]
+        # adata_cl == adata unless the neuronal-only mask (Change 3) is active,
+        # in which case it's the neuronal-cell subset. All cluster-level
+        # statistics run against it; per-cell scoring and the per-cell UMAP
+        # keep the full atlas.
         cluster_mean_expr = compute_cluster_mean_expression(
-            adata, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
+            adata_cl, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
             indices_in_raw=matched_in_raw,
             normalize=True,
         )
@@ -616,6 +759,42 @@ if run_button or st.session_state.analysis_done:
             bactrap_matched, padj_cutoff, log2fc_cutoff,
             min_ip_expression=min_ip_expression, ip_col="IP",
         )
+
+        # ---- Signature refinement (Change 2) ----
+        # Drop candidate signature genes that are undetectable in HypoMap or
+        # too broadly expressed to be cell-type-specific, BEFORE π-score
+        # ranking / top-N selection, so the filtered list flows into AUCell
+        # and every other downstream method.
+        sig_drop_log = pd.DataFrame()
+        n_enriched_prefilter = len(enriched_df)
+        if (sig_filter_detectability or sig_filter_specificity) and len(enriched_df) > 0:
+            _cand_genes = enriched_df["_hypomap_gene_name"].tolist()
+            _cand_idx = [gene_to_idx[g] for g in _cand_genes if g in gene_to_idx]
+            _cand_detection = compute_cell_detection_rate(
+                adata_cl, _cand_idx, indices_in_raw=matched_in_raw,
+            )
+            _cand_cluster_mean = cluster_mean_expr.loc[
+                [g for g in _cand_genes if g in cluster_mean_expr.index]
+            ]
+            _kept_genes, sig_drop_log = filter_signature_genes_by_atlas(
+                _cand_genes, _cand_cluster_mean, _cand_detection,
+                min_detection_rate=sig_min_detection_rate,
+                min_max_cluster_mean=sig_min_max_cluster_mean,
+                specificity_cluster_mean_thresh=sig_specificity_thresh,
+                specificity_max_cluster_fraction=sig_specificity_max_fraction,
+                apply_detectability=sig_filter_detectability,
+                apply_specificity=sig_filter_specificity,
+                logger=logger,
+            )
+            _kept_set = set(_kept_genes)
+            enriched_df = enriched_df[
+                enriched_df["_hypomap_gene_name"].isin(_kept_set)
+            ].copy()
+            logger.info(
+                "Signature refinement: %d enriched genes -> %d after filters",
+                n_enriched_prefilter, len(enriched_df),
+            )
+
         enriched_genes_list = enriched_df["_hypomap_gene_name"].tolist()
 
         # Rank enriched genes by the user-chosen metric (default π-score,
@@ -642,15 +821,16 @@ if run_button or st.session_state.analysis_done:
         _markers_params = (
             hypomap_file.strip(), annotation_col,
             n_markers_per_cluster, min_cells_per_cluster, marker_method,
+            bool(neuronal_clusters is not None),
         )
         _markers_cached = st.session_state.get("_markers_cache")
         if _markers_cached is not None and _markers_cached.get("params") == _markers_params:
             markers = _markers_cached["markers"]
             logger.info("reusing cached markers (params unchanged)")
         else:
-            markers = load_precomputed_markers(adata)
+            markers = load_precomputed_markers(adata_cl)
             if markers is not None:
-                current_clusters = set(adata.obs[annotation_col].unique().astype(str))
+                current_clusters = set(adata_cl.obs[annotation_col].unique().astype(str))
                 marker_clusters = set(markers.keys())
                 overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
                 if overlap_ratio < 0.5:
@@ -659,7 +839,7 @@ if run_button or st.session_state.analysis_done:
                 with st.spinner("Computing marker genes (this may take several minutes)..."):
                     try:
                         markers = compute_marker_genes(
-                            adata, annotation_col,
+                            adata_cl, annotation_col,
                             n_genes=n_markers_per_cluster,
                             min_cells=min_cells_per_cluster,
                             method=marker_method,
@@ -678,6 +858,14 @@ if run_button or st.session_state.analysis_done:
                             f"a coarser annotation level."
                         )
                         markers = {}
+            # When the neuronal-only mask is active, drop markers for any
+            # non-neuronal cluster (precomputed markers loaded from .uns are
+            # full-atlas) so Fisher / GSEA only test neuronal clusters.
+            if neuronal_clusters is not None and markers:
+                _n_before = len(markers)
+                markers = {c: m for c, m in markers.items() if str(c) in neuronal_clusters}
+                logger.info("neuronal mask: markers restricted %d -> %d clusters",
+                            _n_before, len(markers))
             st.session_state["_markers_cache"] = {
                 "params": _markers_params, "markers": markers,
             }
@@ -710,7 +898,7 @@ if run_button or st.session_state.analysis_done:
             top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
 
         frac_expr = compute_fraction_expressing(
-            adata, enriched_gene_indices, annotation_col,
+            adata_cl, enriched_gene_indices, annotation_col,
             min_cells=min_cells_per_cluster,
             indices_in_raw=matched_in_raw,
         )
@@ -719,7 +907,7 @@ if run_button or st.session_state.analysis_done:
         # heuristic sees a low sample max and skips normalisation, leaving
         # the dotplot in raw-count space while correlation/NNLS use log-norm.
         enriched_mean_expr = compute_cluster_mean_expression(
-            adata, enriched_gene_indices, annotation_col,
+            adata_cl, enriched_gene_indices, annotation_col,
             min_cells=min_cells_per_cluster,
             indices_in_raw=matched_in_raw,
             normalize=True,
@@ -771,9 +959,13 @@ if run_button or st.session_state.analysis_done:
         progress.progress(80, text="Computing AUCell scores...")
 
         # ---- AUCell scoring ----
+        # Use the empirical-null seed so the signature scoring shares the
+        # tie-breaking regime with the control sets (Change 1); with the
+        # default seed=0 this is identical to the previous behaviour.
         aucell_run_info: dict = {}
         aucell_scores = compute_aucell_scores(
             adata, top_enriched_genes, top_fraction=aucell_top_fraction,
+            seed=int(empirical_null_seed),
             info_out=aucell_run_info,
         )
 
@@ -809,24 +1001,36 @@ if run_button or st.session_state.analysis_done:
         progress.progress(83, text="Computing per-cluster enrichment significance...")
 
         # ---- AUCell result tables (raw data underlying figures 1a–1c + S2/S3) ----
+        # Per-cell scores / per-cell CSV / Fig 1a stay on the full atlas; the
+        # cluster-level aggregation (Change 3) runs over neuronal cells only
+        # when the neurons-only mask is active.
         _cell_labels_arr = adata.obs[annotation_col].values.astype(str)
         aucell_per_cell_df = pd.DataFrame({
             "cell_id": adata.obs_names.astype(str),
             "cluster": _cell_labels_arr,
             "aucell_score": aucell_scores,
         })
+        if neuronal_mask is not None:
+            _agg_scores = aucell_scores[neuronal_mask]
+            _agg_labels = _cell_labels_arr[neuronal_mask]
+        else:
+            _agg_scores = aucell_scores
+            _agg_labels = _cell_labels_arr
 
         # Per-cluster significance (fix #3: Welch's one-sided t-test
         # cluster-vs-rest with BH-FDR so users can separate "truly enriched"
         # from "small cluster with a slightly above-average mean")
         aucell_cluster_stats_df = compute_cluster_enrichment_stats(
-            aucell_scores, _cell_labels_arr, min_cells=10, alpha=0.05,
+            _agg_scores, _agg_labels, min_cells=10, alpha=0.05,
         )
 
         # Preserve the original ordering (sorted by mean descending) for the
         # figures, but merge in the significance columns so the downloadable
         # table is the authoritative reference.
-        _grp = aucell_per_cell_df.groupby("cluster")["aucell_score"]
+        _grp = (
+            pd.DataFrame({"cluster": _agg_labels, "aucell_score": _agg_scores})
+            .groupby("cluster")["aucell_score"]
+        )
         aucell_per_cluster_df = pd.DataFrame({
             "n_cells": _grp.count(),
             "mean": _grp.mean(),
@@ -848,7 +1052,56 @@ if run_button or st.session_state.analysis_done:
                 on="cluster", how="left",
             )
 
-        progress.progress(85, text="Computing composite ranking...")
+        # ---- Empirical-null AUCell (Change 1) ----
+        # Score N expression-matched random control gene sets and report a
+        # per-cluster z-score / empirical p-value against the control
+        # distribution. Adds columns to aucell_per_cluster.csv.
+        empirical_null_df = pd.DataFrame()
+        if empirical_null_enabled and len(top_enriched_genes) > 0:
+            progress.progress(83, text=f"Empirical null: scoring {int(empirical_null_n)} control sets...")
+
+            def _null_progress(i, n, _p=progress, _N=int(empirical_null_n)):
+                # i/n is a fraction of the batched control-scoring pass; map it
+                # onto progress 83..93 so the bar stays monotone with the
+                # composite (94) / figures (95) steps.
+                _p.progress(min(83 + int(10 * i / max(n, 1)), 93),
+                            text=f"Empirical null: {_N} control sets ({int(100 * i / max(n, 1))}%)...")
+
+            try:
+                empirical_null_df = compute_empirical_null_aucell(
+                    adata_cl, top_enriched_genes,
+                    adata_cl.obs[annotation_col].values.astype(str),
+                    compute_aucell_scores,
+                    n_control_sets=int(empirical_null_n),
+                    n_bins=int(empirical_null_bins),
+                    seed=int(empirical_null_seed),
+                    top_fraction=aucell_top_fraction,
+                    min_cluster_size=min_cells_for_rank,
+                    logger=logger,
+                    progress_callback=_null_progress,
+                )
+            except Exception as e:
+                logger.exception("Empirical-null AUCell computation failed")
+                st.warning(
+                    f"Empirical-null AUCell computation failed: {e}. See "
+                    f"`bactrap_hypomap.log` for the traceback. Analysis "
+                    f"continues without the empirical-null columns."
+                )
+                empirical_null_df = pd.DataFrame()
+            if not empirical_null_df.empty:
+                _null_cols = empirical_null_df.reset_index()
+                aucell_per_cluster_df = aucell_per_cluster_df.merge(
+                    _null_cols, on="cluster", how="left",
+                )
+                # Clusters below the size gate get no empirical-null row; the
+                # left-merge leaves NaN there. Keep the count an integer (0 =
+                # "not evaluated for this cluster") rather than a float-with-NaN.
+                if "n_control_sets_used" in aucell_per_cluster_df.columns:
+                    aucell_per_cluster_df["n_control_sets_used"] = (
+                        aucell_per_cluster_df["n_control_sets_used"].fillna(0).astype(int)
+                    )
+
+        progress.progress(94, text="Computing composite ranking...")
 
         # ---- Composite ranking ----
         composite_df = compute_composite_ranking(
@@ -883,6 +1136,8 @@ if run_button or st.session_state.analysis_done:
             "cluster_mean_expr": cluster_mean_expr,
             "enriched_df": enriched_df,
             "enriched_genes_list": enriched_genes_list,
+            "sig_drop_log": sig_drop_log,
+            "n_enriched_prefilter": n_enriched_prefilter,
             "top_enriched_genes": top_enriched_genes,
             "corr_df": corr_df,
             "markers": markers,
@@ -901,6 +1156,7 @@ if run_button or st.session_state.analysis_done:
             "aucell_per_cell_df": aucell_per_cell_df,
             "aucell_per_cluster_df": aucell_per_cluster_df,
             "aucell_cluster_stats_df": aucell_cluster_stats_df,
+            "empirical_null_df": empirical_null_df,
             "composite_df": composite_df,
             "sub_indices": sub_indices,
             "umap_coords": umap_coords,
@@ -920,6 +1176,8 @@ if run_button or st.session_state.analysis_done:
         cluster_mean_expr = _c["cluster_mean_expr"]
         enriched_df = _c["enriched_df"]
         enriched_genes_list = _c["enriched_genes_list"]
+        sig_drop_log = _c.get("sig_drop_log", pd.DataFrame())
+        n_enriched_prefilter = _c.get("n_enriched_prefilter", len(enriched_df))
         top_enriched_genes = _c["top_enriched_genes"]
         corr_df = _c["corr_df"]
         markers = _c["markers"]
@@ -938,6 +1196,7 @@ if run_button or st.session_state.analysis_done:
         aucell_per_cell_df = _c["aucell_per_cell_df"]
         aucell_per_cluster_df = _c["aucell_per_cluster_df"]
         aucell_cluster_stats_df = _c.get("aucell_cluster_stats_df", pd.DataFrame())
+        empirical_null_df = _c.get("empirical_null_df", pd.DataFrame())
         composite_df = _c["composite_df"]
         sub_indices = _c["sub_indices"]
         umap_coords = _c["umap_coords"]
@@ -959,6 +1218,7 @@ if run_button or st.session_state.analysis_done:
     sanity_cache_key = (
         hypomap_file.strip(), annotation_col,
         _sanity_min_cells, sanity_gene.strip().lower(),
+        bool(neuronal_clusters is not None),
     )
     _sanity_cached = st.session_state.get("_sanity_cache")
     if _sanity_cached is not None and _sanity_cached.get("key") == sanity_cache_key:
@@ -966,7 +1226,7 @@ if run_button or st.session_state.analysis_done:
     else:
         with st.spinner(f"Computing per-cluster {sanity_gene} expression..."):
             sanity_stats = compute_single_gene_cluster_stats(
-                adata, sanity_gene.strip(), annotation_col,
+                adata_cl, sanity_gene.strip(), annotation_col,
                 adata_gene_lookup=_adata_lookup,
                 has_raw=_adata_has_raw,
                 min_cells=_sanity_min_cells,
@@ -998,6 +1258,19 @@ if run_button or st.session_state.analysis_done:
                 baseline_filter_state = "broken_empty"
             else:
                 baseline_filter_state = "active"
+
+    # Clusters eligible for the AUCell top-N figure rankings: the baseline
+    # filter survivors (when active) intersected with the neuronal clusters
+    # (when the neurons-only mask is active). When both are off, None == no
+    # restriction.
+    if baseline_allowed is not None and neuronal_clusters is not None:
+        _aucell_allowed = {str(c) for c in baseline_allowed} & {str(c) for c in neuronal_clusters}
+    elif baseline_allowed is not None:
+        _aucell_allowed = {str(c) for c in baseline_allowed}
+    elif neuronal_clusters is not None:
+        _aucell_allowed = {str(c) for c in neuronal_clusters}
+    else:
+        _aucell_allowed = None
 
     # ---- Optional display-time filter for Unassigned / Mixed clusters ----
     # HypoMap's "Unassigned" and "Mixed" clusters are uncurated aggregates
@@ -1105,10 +1378,12 @@ if run_button or st.session_state.analysis_done:
         st.session_state.table_bytes = {}
 
     # Pre-encode AUCell result tables.  Both the per-cell (~400k rows) and
-    # per-cluster (~185 rows) CSVs shrink when the baseline filter drops
-    # clusters, so re-serialise whenever the filter signature changes.
+    # per-cluster (~185 rows) CSVs change when the baseline filter or the
+    # neurons-only mask change the cluster universe, so re-serialise whenever
+    # the filter signature changes.
     _baseline_sig = (
-        tuple(sorted(baseline_allowed)) if baseline_allowed is not None else None
+        tuple(sorted(baseline_allowed)) if baseline_allowed is not None else (),
+        bool(neuronal_clusters is not None),
     )
     if st.session_state.table_bytes.get("_aucell_per_cell_sig") != _baseline_sig:
         st.session_state.table_bytes["aucell_per_cell"] = (
@@ -1129,14 +1404,30 @@ if run_button or st.session_state.analysis_done:
 
     # Filename suffix applied to filter-affected CSV downloads so a
     # collaborator who opens a 40-row composite_ranking.csv can tell from
-    # the filename alone that it's a Pnoc-ge-0.05 subset, not the full 185.
+    # the filename alone that it's a filtered subset, not the full atlas.
+    # Segments combine in the order
+    #   {cre_driver_filter}_{neuronal_filter}_{null_filter}
     # Dots are replaced with 'p' (safe on every filesystem).
+    _empirical_null_active = bool(
+        empirical_null_enabled
+        and isinstance(empirical_null_df, pd.DataFrame)
+        and not empirical_null_df.empty
+    )
+
     def _filtered_name(basename: str) -> str:
-        if baseline_allowed is None:
+        segs = []
+        if baseline_allowed is not None:
+            segs.append(
+                f"{sanity_gene.lower()}_ge{sanity_baseline_mean_expr:.2f}".replace(".", "p")
+            )
+        if neuronal_clusters is not None:
+            segs.append("neuronal")
+        if _empirical_null_active:
+            segs.append(f"null{int(empirical_null_n)}")
+        if not segs:
             return basename
         stem, _, ext = basename.rpartition(".")
-        tag = f"{sanity_gene.lower()}_ge{sanity_baseline_mean_expr:.2f}".replace(".", "p")
-        return f"{stem}_{tag}.{ext}"
+        return f"{stem}_{'_'.join(segs)}.{ext}"
 
     # ---- Global baseline-filter status banner (above the tab group) ----
     # Rendered once so every tab — not just AUCell — makes the filter state
@@ -1167,6 +1458,18 @@ if run_button or st.session_state.analysis_done:
             f"mean {sanity_gene} ≥ {sanity_baseline_mean_expr:.2f} "
             f"discards every cluster. Tabs show unfiltered data. "
             f"Lower the slider."
+        )
+
+    if neuronal_clusters is not None:
+        st.info(
+            f"**Neurons-only mode active** — every cluster-level analysis "
+            f"(correlation, Fisher, NNLS, GSEA, AUCell cluster aggregation, "
+            f"Cre-driver sanity, composite, heatmap, dot plot, empirical null) "
+            f"runs over **{int(neuronal_mask.sum()):,}** neuronal cells / "
+            f"{adata.n_obs:,} total ({len(neuronal_clusters)} neuronal "
+            f"clusters at `{annotation_col}`). The per-cell AUCell UMAP "
+            f"(Fig 1a) and per-cell CSV still cover all cells. Filtered CSV "
+            f"downloads carry a `_neuronal` suffix."
         )
 
     # ======================================================================
@@ -1244,6 +1547,54 @@ if run_button or st.session_state.analysis_done:
         else:
             st.warning("No genes pass the current enrichment thresholds.")
 
+        # ---- Signature refinement diagnostics (Change 2) ----
+        with st.expander("Signature refinement diagnostics", expanded=False):
+            if not (sig_filter_detectability or sig_filter_specificity):
+                st.caption(
+                    "Both signature-refinement filters are disabled — the "
+                    "signature is the unfiltered padj / log₂FC / IP set, "
+                    "ranked by the chosen metric."
+                )
+            elif sig_drop_log is None or len(sig_drop_log) == 0:
+                st.caption("No candidate genes to refine.")
+            else:
+                _n_total = len(sig_drop_log)
+                _n_kept = int((sig_drop_log["status"] == "kept").sum())
+                _n_dropped = _n_total - _n_kept
+                st.markdown(
+                    f"**{_n_kept} kept / {_n_dropped} dropped** out of "
+                    f"{_n_total} enriched genes "
+                    f"(detectability filter: {'on' if sig_filter_detectability else 'off'}; "
+                    f"specificity filter: {'on' if sig_filter_specificity else 'off'})."
+                )
+                _by_reason = (
+                    sig_drop_log.loc[sig_drop_log["status"] != "kept", "status"]
+                    .value_counts()
+                )
+                if len(_by_reason):
+                    st.caption("Drops by reason: " + "; ".join(
+                        f"{r} → {n}" for r, n in _by_reason.items()
+                    ))
+                _show = sig_drop_log.copy()
+                _show.columns = [
+                    "Gene", "Status", "Cell detection rate",
+                    "Max cluster mean (log-norm)", "Frac. clusters > threshold",
+                ]
+                st.dataframe(
+                    _show.style.format({
+                        "Cell detection rate": "{:.3f}",
+                        "Max cluster mean (log-norm)": "{:.3f}",
+                        "Frac. clusters > threshold": "{:.2%}",
+                    }),
+                    use_container_width=True,
+                )
+                st.download_button(
+                    "Download signature refinement log (CSV)",
+                    sig_drop_log.to_csv(index=False).encode(),
+                    "signature_refinement_log.csv", "text/csv",
+                    key="dl_sig_refine_csv",
+                )
+
         st.subheader("Figure: bacTRAP Volcano Plot")
         fig_volcano = figure_bactrap_volcano(
             bactrap_matched,
@@ -1308,6 +1659,19 @@ if run_button or st.session_state.analysis_done:
                 f"Full per-cluster statistics — `t_stat`, `pvalue`, `qvalue`, "
                 f"`significant` — are appended to the downloadable "
                 f"`aucell_per_cluster.csv`."
+            )
+        if _empirical_null_active:
+            _n_used = int(empirical_null_df["n_control_sets_used"].iloc[0])
+            _n_pos = int((aucell_per_cluster_df.get("qvalue_empirical", pd.Series(dtype=float)) < 0.05).sum())
+            st.markdown(
+                f"**Empirical null (matched-expression controls):** scored "
+                f"**{_n_used}** random control gene sets matched to the "
+                f"signature in size and atlas-wide expression bins; "
+                f"{_n_pos} cluster(s) pass **q_empirical < 0.05**. The "
+                f"`null_mean`, `null_sd`, `z_empirical`, `pvalue_empirical` "
+                f"and `qvalue_empirical` columns are appended to "
+                f"`aucell_per_cluster.csv`; see the companion violin panel "
+                f"below Figure 1c for the top 15 by `z_empirical`."
             )
 
         # Figure 1a: AUCell UMAP
@@ -1460,7 +1824,7 @@ if run_button or st.session_state.analysis_done:
             aucell_scores, cell_labels,
             top_n=25, double_column=double_column,
             min_cluster_cells=min_cells_for_rank,
-            allowed_clusters=baseline_allowed,
+            allowed_clusters=_aucell_allowed,
         )
         st.pyplot(fig_1b)
         _cache_fig("fig_1b_aucell_barplot", fig_1b)
@@ -1519,7 +1883,7 @@ if run_button or st.session_state.analysis_done:
             aucell_scores, cell_labels,
             top_n=15, double_column=True,
             min_cluster_cells=min_cells_for_rank,
-            allowed_clusters=baseline_allowed,
+            allowed_clusters=_aucell_allowed,
         )
         st.pyplot(fig_1c)
         _cache_fig("fig_1c_aucell_violins", fig_1c)
@@ -1562,6 +1926,48 @@ if run_button or st.session_state.analysis_done:
                 help="Per-cell AUCell scores — use to reconstruct the full violin shape.",
             )
         plt.close(fig_1c)
+
+        # ---- Empirical-null companion violins (Change 1) ----
+        if _empirical_null_active and "z_empirical" in aucell_per_cluster_df.columns:
+            _n_used = int(empirical_null_df["n_control_sets_used"].iloc[0])
+            st.subheader("Figure 1c (companion): Top-15 by empirical z-score")
+            st.markdown(
+                f"**Top 15 by empirical z-score (matched-expression null).** "
+                f"Same per-cluster AUCell distributions as above, but ranked "
+                f"by `z_empirical` — (cluster mean − mean of {_n_used} "
+                f"expression-matched random control gene-set means) / their SD "
+                f"(Aibar et al. 2017). Re-orders clusters whose AUCell is "
+                f"inflated by a wide gene-rank distribution rather than by true "
+                f"bacTRAP-signature enrichment. Annotations show z; colour "
+                f"encodes z (viridis). Source: the `z_empirical`, "
+                f"`pvalue_empirical`, `qvalue_empirical`, `null_mean`, "
+                f"`null_sd` columns in `aucell_per_cluster.csv`."
+            )
+            _z_series = aucell_per_cluster_df.set_index("cluster")["z_empirical"]
+            fig_1c_z = figure_aucell_zscore_violins(
+                aucell_scores, cell_labels, _z_series,
+                top_n=15, double_column=True,
+                min_cluster_cells=min_cells_for_rank,
+                allowed_clusters=_aucell_allowed,
+            )
+            st.pyplot(fig_1c_z)
+            _cache_fig("fig_1c_aucell_zscore_violins", fig_1c_z)
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_1c_aucell_zscore_violins"]["pdf"],
+                    "fig_1c_aucell_zscore_violins.pdf", "application/pdf",
+                    key="dl_fig_1c_z_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_1c_aucell_zscore_violins"]["svg"],
+                    "fig_1c_aucell_zscore_violins.svg", "image/svg+xml",
+                    key="dl_fig_1c_z_svg",
+                )
+            plt.close(fig_1c_z)
 
         # Supplementary S3: AUCell Score Histogram (was Figure 1d)
         st.subheader("Supplementary Figure S3: Global AUCell Score Distribution")
