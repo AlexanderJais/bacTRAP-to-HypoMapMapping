@@ -10,7 +10,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from analysis import filter_signature_genes_by_atlas, compute_aucell_scores, compute_empirical_null_aucell
+from analysis import (
+    filter_signature_genes_by_atlas,
+    compute_aucell_scores,
+    compute_aucell_scores_multi,
+    compute_empirical_null_aucell,
+)
 from data_loading import get_neuronal_cell_mask
 
 
@@ -138,6 +143,24 @@ def _toy_adata(n_cells=200, n_genes=500, n_clusters=5, seed=1):
     adata = ad.AnnData(X=sparse.csr_matrix(X), obs=obs, var=var)
     adata.raw = adata
     return adata, sig_genes
+
+
+def test_compute_aucell_scores_multi_matches_single():
+    adata, sig_genes = _toy_adata()
+    # A few signatures of varying composition (all small relative to the τ
+    # window, so the shared n_top equals each one's single-scorer n_top).
+    sigs = [
+        sig_genes,                         # the planted 20-gene signature
+        [f"g{i}" for i in range(30, 55)],  # 25 unrelated genes
+        ["g0", "g1", "g2", "MISSING_GENE"],  # tiny + an unmatched name
+    ]
+    multi = compute_aucell_scores_multi(adata, sigs, seed=0)
+    assert multi.shape == (adata.n_obs, len(sigs))
+    for j, s in enumerate(sigs):
+        single = compute_aucell_scores(adata, s, seed=0)
+        assert np.array_equal(multi[:, j], single), f"signature {j} mismatch"
+    # empty list → (n_cells, 0)
+    assert compute_aucell_scores_multi(adata, [], seed=0).shape == (adata.n_obs, 0)
 
 
 def test_compute_empirical_null_aucell_reproducible():

@@ -1058,13 +1058,14 @@ if run_button or st.session_state.analysis_done:
         # distribution. Adds columns to aucell_per_cluster.csv.
         empirical_null_df = pd.DataFrame()
         if empirical_null_enabled and len(top_enriched_genes) > 0:
-            progress.progress(83, text=f"Empirical null: 0/{int(empirical_null_n)} control sets...")
+            progress.progress(83, text=f"Empirical null: scoring {int(empirical_null_n)} control sets...")
 
-            def _null_progress(i, n, _p=progress):
-                # map control-set i∈[1, n] onto progress 83..93 so the bar
-                # stays monotone with the composite (94) / figures (95) steps
+            def _null_progress(i, n, _p=progress, _N=int(empirical_null_n)):
+                # i/n is a fraction of the batched control-scoring pass; map it
+                # onto progress 83..93 so the bar stays monotone with the
+                # composite (94) / figures (95) steps.
                 _p.progress(min(83 + int(10 * i / max(n, 1)), 93),
-                            text=f"Empirical null: {i}/{n} control sets scored...")
+                            text=f"Empirical null: {_N} control sets ({int(100 * i / max(n, 1))}%)...")
 
             try:
                 empirical_null_df = compute_empirical_null_aucell(

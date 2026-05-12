@@ -1276,6 +1276,135 @@ def compute_aucell_scores(
     return scores
 
 
+def compute_aucell_scores_multi(
+    adata,
+    gene_name_lists: List[List[str]],
+    *,
+    use_raw: bool = True,
+    top_fraction: float = 0.05,
+    seed: int = 0,
+    progress_callback=None,
+) -> np.ndarray:
+    """Score several gene-set signatures with AUCell in a single pass.
+
+    Equivalent to calling :func:`compute_aucell_scores` once per signature, but
+    the expensive per-cell ranking — random-jitter tie-breaking + ``argpartition``
+    + ``argsort`` — is done **once** and shared across all signatures; only the
+    cheap per-signature recovery-curve AUC differs.  Used to score the empirical-
+    null control sets without N separate passes over the (≈385k-cell) atlas.
+
+    All signatures share the same top-*k* window ``k = max(⌈top_fraction·G⌉,
+    max_s |S_s|)``.  This is identical to what the single-signature scorer would
+    pick for each signature unless some signature is larger than the τ window
+    (the "bumped" regime), in which case the wider shared window is a minor
+    approximation; for the empirical null (control sets the same size as the
+    signature, both ≪ the τ window in practice) the result is bit-identical to
+    looping :func:`compute_aucell_scores`.
+
+    ``progress_callback`` (optional) is called ``fn(chunks_done, n_chunks)``.
+
+    Returns
+    -------
+    np.ndarray of shape ``(n_cells, len(gene_name_lists))``, dtype float32.
+    """
+    lookup, _source_gene_names, is_raw_lookup = _build_adata_gene_lookup(adata, use_raw=use_raw)
+    X = adata.raw.X if (is_raw_lookup and adata.raw is not None) else adata.X
+    n_cells, n_genes = X.shape
+    n_sigs = len(gene_name_lists)
+    if n_sigs == 0:
+        return np.zeros((n_cells, 0), dtype=np.float32)
+
+    # Resolve each signature to its (sorted, de-duplicated) gene-column indices.
+    query_idx_per_sig: List[np.ndarray] = []
+    n_query_per_sig = np.zeros(n_sigs, dtype=np.int64)
+    for s, names in enumerate(gene_name_lists):
+        idxs = []
+        for g in names:
+            key = str(g).strip().lower()
+            if key in lookup:
+                idxs.append(lookup[key][1])
+        arr = np.array(sorted(set(idxs)), dtype=np.int64)
+        query_idx_per_sig.append(arr)
+        n_query_per_sig[s] = arr.size
+
+    max_nq = int(n_query_per_sig.max()) if n_sigs else 0
+    n_top = max(int(n_genes * top_fraction), max(max_nq, 1))
+    n_top = min(n_top, n_genes)
+
+    # query_masks[s, g] = 1.0 iff gene g ∈ signature s
+    query_masks = np.zeros((n_sigs, n_genes), dtype=np.float32)
+    for s, arr in enumerate(query_idx_per_sig):
+        if arr.size:
+            query_masks[s, arr] = 1.0
+    query_masks_T = np.ascontiguousarray(query_masks.T)  # (n_genes, n_sigs)
+
+    # theoretical max discrete-AUC per signature within the shared top-k window
+    nq = n_query_per_sig.astype(np.float64)
+    max_auc = np.where(nq > 0, nq * (n_top - (nq - 1.0) / 2.0), 1.0).astype(np.float64)
+    # recovery-curve weights: a hit at rank j (0-indexed) within the top-k window
+    # contributes (n_top - j) to  sum_r C(r) == sum(cumsum(is_hit)).
+    w = np.arange(n_top, 0, -1, dtype=np.float64)
+
+    # ---- jitter scale: same heuristic as compute_aucell_scores ----
+    sampling_rng, jitter_rng = np.random.default_rng(int(seed)).spawn(2)
+    sample_n = min(500, n_cells)
+    sample_pick = (
+        sampling_rng.choice(n_cells, sample_n, replace=False)
+        if n_cells > sample_n else np.arange(n_cells)
+    )
+    sample_X = X[sample_pick, :]
+    sample_X = np.asarray(sample_X.toarray()) if sparse.issparse(sample_X) else np.asarray(sample_X)
+    sample_max = float(sample_X.max()) if sample_X.size else 0.0
+    sample_is_integer = sample_X.size > 0 and bool(np.all(sample_X == np.round(sample_X)))
+    if sample_is_integer and sample_max > 5:
+        jitter_scale = np.float32(0.49)
+    else:
+        nz = sample_X[sample_X > 0]
+        jitter_scale = np.float32(0.49 * float(nz.min())) if nz.size else np.float32(1e-6)
+
+    logger.info(
+        "compute_aucell_scores_multi: %d signatures, %d cells, n_top=%d, "
+        "sig sizes %d..%d, seed=%d",
+        n_sigs, n_cells, n_top,
+        int(n_query_per_sig.min()) if n_sigs else 0, max_nq, int(seed),
+    )
+
+    chunk_size = 5000
+    n_chunks = (n_cells + chunk_size - 1) // chunk_size
+    scores = np.zeros((n_cells, n_sigs), dtype=np.float32)
+    for ci, start in enumerate(range(0, n_cells, chunk_size)):
+        end = min(start + chunk_size, n_cells)
+        X_chunk = X[start:end, :]
+        X_chunk = np.asarray(X_chunk.toarray()) if sparse.issparse(X_chunk) else np.asarray(X_chunk)
+        X_chunk = X_chunk.astype(np.float32, copy=True)
+        chunk_n = X_chunk.shape[0]
+        X_chunk += jitter_rng.random((chunk_n, n_genes), dtype=np.float32) * jitter_scale
+
+        top_idx = np.argpartition(X_chunk, -n_top, axis=1)[:, -n_top:]      # (chunk_n, n_top)
+        vals = np.take_along_axis(X_chunk, top_idx, axis=1)
+        order = np.argsort(-vals, axis=1)                                    # descending by value
+        sorted_top = np.take_along_axis(top_idx, order, axis=1)              # (chunk_n, n_top)
+
+        # Sparse recovery-weight matrix  W[i, sorted_top[i, j]] = w[j];
+        # then  AUC[i, s] = sum_g W[i, g] * query_masks[s, g]  ==  W @ Q.T
+        indptr = np.arange(0, chunk_n * n_top + 1, n_top, dtype=np.int64)
+        W_sp = sparse.csr_matrix(
+            (np.tile(w, chunk_n), sorted_top.ravel(), indptr),
+            shape=(chunk_n, n_genes),
+        )
+        auc_chunk = W_sp.dot(query_masks_T)                                  # (chunk_n, n_sigs)
+        scores[start:end, :] = (auc_chunk / max_auc[None, :]).astype(np.float32)
+        if progress_callback is not None:
+            try:
+                progress_callback(ci + 1, n_chunks)
+            except Exception:
+                pass
+
+    logger.info("compute_aucell_scores_multi: done — scores mean=%.4f over %d signatures",
+                float(scores.mean()) if scores.size else 0.0, n_sigs)
+    return scores
+
+
 def _atlas_gene_mean_logexpr(adata, use_raw: bool = True) -> np.ndarray:
     """Atlas-wide mean expression per gene, log1p-scaled (raw-layer order).
 
@@ -1457,33 +1586,34 @@ def compute_empirical_null_aucell(
         ])
 
     import time as _time
-    control_cluster_means = np.empty((int(n_control_sets), len(eligible_clusters)), dtype=np.float64)
-    n_used = 0
+    # Draw all N control gene-name lists up front (deterministic given `seed`),
+    # then score them in a single batched pass over the atlas (Change #6: this
+    # replaces N separate AUCell passes — the per-cell ranking is shared).
+    control_name_lists: List[List[str]] = []
+    for _c in range(int(n_control_sets)):
+        ctrl_idx = [int(rng.choice(bin_to_candidates[int(gene_bins[idx])])) for idx in matchable_idx]
+        control_name_lists.append([str(gene_names[i]) for i in ctrl_idx])
+
     _t0 = _time.time()
-    _per_set_times: List[float] = []
-    for c in range(int(n_control_sets)):
-        _ts = _time.time()
-        ctrl_idx = []
-        for idx in matchable_idx:
-            cand = bin_to_candidates[int(gene_bins[idx])]
-            ctrl_idx.append(int(rng.choice(cand)))
-        ctrl_names = [str(gene_names[i]) for i in ctrl_idx]
-        ctrl_scores = np.asarray(
-            compute_aucell_fn(adata, ctrl_names, top_fraction=top_fraction, seed=int(seed)),
-            dtype=np.float64,
-        )
-        control_cluster_means[c, :] = _per_cluster_means(ctrl_scores).to_numpy()
-        n_used += 1
-        _per_set_times.append(_time.time() - _ts)
-        if progress_callback is not None:
-            try:
-                progress_callback(c + 1, int(n_control_sets))
-            except Exception:
-                pass
+    ctrl_scores_mat = compute_aucell_scores_multi(
+        adata, control_name_lists,
+        use_raw=use_raw, top_fraction=top_fraction, seed=int(seed),
+        progress_callback=progress_callback,
+    )  # (n_cells, N)
     _t_total = _time.time() - _t0
+    n_used = int(n_control_sets)
+    # Per-cluster mean of every control set at once → (n_eligible, N) → (N, n_eligible)
+    control_cluster_means = (
+        pd.DataFrame(np.asarray(ctrl_scores_mat, dtype=np.float64))
+        .groupby(labels.values).mean()
+        .reindex(eligible_clusters)
+        .to_numpy()
+        .T
+    )
     log.info(
-        "Mean control set scoring time: %.1fs; total null time: %.1fs",
-        float(np.mean(_per_set_times)) if _per_set_times else 0.0, _t_total,
+        "Empirical null: scored %d control sets in one batched pass — "
+        "%.1fs total (%.3fs/set amortised)",
+        n_used, _t_total, _t_total / max(n_used, 1),
     )
 
     null_mean = control_cluster_means.mean(axis=0)
