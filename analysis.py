@@ -1524,7 +1524,7 @@ def compute_empirical_null_aucell(
     try:
         valid = np.isfinite(z) & np.isfinite(sig_vec)
         if valid.sum() >= 3:
-            rho = stats.spearmanr(sig_vec[valid], z[valid]).statistic
+            rho = float(stats.spearmanr(sig_vec[valid], z[valid])[0])
             log.info("Empirical null sanity: Spearman(mean, z_empirical) = %.3f over %d clusters",
                      float(rho), int(valid.sum()))
             ranked_by_mean = sig_means[valid].sort_values(ascending=False).index.tolist()

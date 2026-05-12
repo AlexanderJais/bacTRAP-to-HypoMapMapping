@@ -659,6 +659,9 @@ _analysis_params = (
     # Change 2 — signature refinement
     sig_filter_detectability, sig_min_detection_rate, sig_min_max_cluster_mean,
     sig_filter_specificity, sig_specificity_thresh, sig_specificity_max_fraction,
+    # Change 1 — empirical-null AUCell
+    bool(empirical_null_enabled), int(empirical_null_n), int(empirical_null_bins),
+    int(empirical_null_seed),
 )
 
 if run_button or st.session_state.analysis_done:
@@ -956,9 +959,13 @@ if run_button or st.session_state.analysis_done:
         progress.progress(80, text="Computing AUCell scores...")
 
         # ---- AUCell scoring ----
+        # Use the empirical-null seed so the signature scoring shares the
+        # tie-breaking regime with the control sets (Change 1); with the
+        # default seed=0 this is identical to the previous behaviour.
         aucell_run_info: dict = {}
         aucell_scores = compute_aucell_scores(
             adata, top_enriched_genes, top_fraction=aucell_top_fraction,
+            seed=int(empirical_null_seed),
             info_out=aucell_run_info,
         )
 
@@ -1045,6 +1052,45 @@ if run_button or st.session_state.analysis_done:
                 on="cluster", how="left",
             )
 
+        # ---- Empirical-null AUCell (Change 1) ----
+        # Score N expression-matched random control gene sets and report a
+        # per-cluster z-score / empirical p-value against the control
+        # distribution. Adds columns to aucell_per_cluster.csv.
+        empirical_null_df = pd.DataFrame()
+        if empirical_null_enabled and len(top_enriched_genes) > 0:
+            progress.progress(83, text=f"Empirical null: 0/{int(empirical_null_n)} control sets...")
+
+            def _null_progress(i, n, _p=progress):
+                _p.progress(min(83 + int(11 * i / max(n, 1)), 94),
+                            text=f"Empirical null: {i}/{n} control sets scored...")
+
+            try:
+                empirical_null_df = compute_empirical_null_aucell(
+                    adata_cl, top_enriched_genes,
+                    adata_cl.obs[annotation_col].values.astype(str),
+                    compute_aucell_scores,
+                    n_control_sets=int(empirical_null_n),
+                    n_bins=int(empirical_null_bins),
+                    seed=int(empirical_null_seed),
+                    top_fraction=aucell_top_fraction,
+                    min_cluster_size=min_cells_for_rank,
+                    logger=logger,
+                    progress_callback=_null_progress,
+                )
+            except Exception as e:
+                logger.exception("Empirical-null AUCell computation failed")
+                st.warning(
+                    f"Empirical-null AUCell computation failed: {e}. See "
+                    f"`bactrap_hypomap.log` for the traceback. Analysis "
+                    f"continues without the empirical-null columns."
+                )
+                empirical_null_df = pd.DataFrame()
+            if not empirical_null_df.empty:
+                _null_cols = empirical_null_df.reset_index()
+                aucell_per_cluster_df = aucell_per_cluster_df.merge(
+                    _null_cols, on="cluster", how="left",
+                )
+
         progress.progress(85, text="Computing composite ranking...")
 
         # ---- Composite ranking ----
@@ -1100,6 +1146,7 @@ if run_button or st.session_state.analysis_done:
             "aucell_per_cell_df": aucell_per_cell_df,
             "aucell_per_cluster_df": aucell_per_cluster_df,
             "aucell_cluster_stats_df": aucell_cluster_stats_df,
+            "empirical_null_df": empirical_null_df,
             "composite_df": composite_df,
             "sub_indices": sub_indices,
             "umap_coords": umap_coords,
@@ -1139,6 +1186,7 @@ if run_button or st.session_state.analysis_done:
         aucell_per_cell_df = _c["aucell_per_cell_df"]
         aucell_per_cluster_df = _c["aucell_per_cluster_df"]
         aucell_cluster_stats_df = _c.get("aucell_cluster_stats_df", pd.DataFrame())
+        empirical_null_df = _c.get("empirical_null_df", pd.DataFrame())
         composite_df = _c["composite_df"]
         sub_indices = _c["sub_indices"]
         umap_coords = _c["umap_coords"]
@@ -1347,8 +1395,15 @@ if run_button or st.session_state.analysis_done:
     # Filename suffix applied to filter-affected CSV downloads so a
     # collaborator who opens a 40-row composite_ranking.csv can tell from
     # the filename alone that it's a filtered subset, not the full atlas.
-    # Segments combine in the order  {cre_driver_filter}_{neuronal_filter}.
+    # Segments combine in the order
+    #   {cre_driver_filter}_{neuronal_filter}_{null_filter}
     # Dots are replaced with 'p' (safe on every filesystem).
+    _empirical_null_active = bool(
+        empirical_null_enabled
+        and isinstance(empirical_null_df, pd.DataFrame)
+        and not empirical_null_df.empty
+    )
+
     def _filtered_name(basename: str) -> str:
         segs = []
         if baseline_allowed is not None:
@@ -1357,6 +1412,8 @@ if run_button or st.session_state.analysis_done:
             )
         if neuronal_clusters is not None:
             segs.append("neuronal")
+        if _empirical_null_active:
+            segs.append(f"null{int(empirical_null_n)}")
         if not segs:
             return basename
         stem, _, ext = basename.rpartition(".")
@@ -1592,6 +1649,19 @@ if run_button or st.session_state.analysis_done:
                 f"Full per-cluster statistics — `t_stat`, `pvalue`, `qvalue`, "
                 f"`significant` — are appended to the downloadable "
                 f"`aucell_per_cluster.csv`."
+            )
+        if _empirical_null_active:
+            _n_used = int(empirical_null_df["n_control_sets_used"].iloc[0])
+            _n_pos = int((aucell_per_cluster_df.get("qvalue_empirical", pd.Series(dtype=float)) < 0.05).sum())
+            st.markdown(
+                f"**Empirical null (matched-expression controls):** scored "
+                f"**{_n_used}** random control gene sets matched to the "
+                f"signature in size and atlas-wide expression bins; "
+                f"{_n_pos} cluster(s) pass **q_empirical < 0.05**. The "
+                f"`null_mean`, `null_sd`, `z_empirical`, `pvalue_empirical` "
+                f"and `qvalue_empirical` columns are appended to "
+                f"`aucell_per_cluster.csv`; see the companion violin panel "
+                f"below Figure 1c for the top 15 by `z_empirical`."
             )
 
         # Figure 1a: AUCell UMAP
@@ -1846,6 +1916,48 @@ if run_button or st.session_state.analysis_done:
                 help="Per-cell AUCell scores — use to reconstruct the full violin shape.",
             )
         plt.close(fig_1c)
+
+        # ---- Empirical-null companion violins (Change 1) ----
+        if _empirical_null_active and "z_empirical" in aucell_per_cluster_df.columns:
+            _n_used = int(empirical_null_df["n_control_sets_used"].iloc[0])
+            st.subheader("Figure 1c (companion): Top-15 by empirical z-score")
+            st.markdown(
+                f"**Top 15 by empirical z-score (matched-expression null).** "
+                f"Same per-cluster AUCell distributions as above, but ranked "
+                f"by `z_empirical` — (cluster mean − mean of {_n_used} "
+                f"expression-matched random control gene-set means) / their SD "
+                f"(Aibar et al. 2017). Re-orders clusters whose AUCell is "
+                f"inflated by a wide gene-rank distribution rather than by true "
+                f"bacTRAP-signature enrichment. Annotations show z; colour "
+                f"encodes z (viridis). Source: the `z_empirical`, "
+                f"`pvalue_empirical`, `qvalue_empirical`, `null_mean`, "
+                f"`null_sd` columns in `aucell_per_cluster.csv`."
+            )
+            _z_series = aucell_per_cluster_df.set_index("cluster")["z_empirical"]
+            fig_1c_z = figure_aucell_zscore_violins(
+                aucell_scores, cell_labels, _z_series,
+                top_n=15, double_column=True,
+                min_cluster_cells=min_cells_for_rank,
+                allowed_clusters=_aucell_allowed,
+            )
+            st.pyplot(fig_1c_z)
+            _cache_fig("fig_1c_aucell_zscore_violins", fig_1c_z)
+            col_pdf, col_svg = st.columns(2)
+            with col_pdf:
+                st.download_button(
+                    "Download PDF",
+                    st.session_state.fig_bytes["fig_1c_aucell_zscore_violins"]["pdf"],
+                    "fig_1c_aucell_zscore_violins.pdf", "application/pdf",
+                    key="dl_fig_1c_z_pdf",
+                )
+            with col_svg:
+                st.download_button(
+                    "Download SVG",
+                    st.session_state.fig_bytes["fig_1c_aucell_zscore_violins"]["svg"],
+                    "fig_1c_aucell_zscore_violins.svg", "image/svg+xml",
+                    key="dl_fig_1c_z_svg",
+                )
+            plt.close(fig_1c_z)
 
         # Supplementary S3: AUCell Score Histogram (was Figure 1d)
         st.subheader("Supplementary Figure S3: Global AUCell Score Distribution")
