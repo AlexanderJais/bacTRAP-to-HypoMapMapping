@@ -233,18 +233,17 @@ restrict_neuronal = st.sidebar.checkbox(
 # undetectable in HypoMap or too broadly expressed to be cell-type-specific.
 with st.sidebar.expander("Signature refinement", expanded=False):
     sig_filter_detectability = st.checkbox(
-        "Filter signature by HypoMap detectability",
+        "Filter by HypoMap detectability",
         value=True,
         help=(
-            "Drop bacTRAP signature genes that are essentially undetectable "
-            "in the atlas — fraction of cells expressing below the floor "
-            "below, OR maximum per-cluster mean log-norm expression below "
-            "the floor below. Such genes never enter any cell's top-τ AUCell "
-            "window and only add noise."
+            "Drops signature genes that are essentially undetectable in "
+            "HypoMap and can't contribute to AUCell (detection rate below "
+            "the floor below, or max per-cluster mean log-norm expression "
+            "below the floor below)."
         ),
     )
     sig_min_detection_rate = st.slider(
-        "Min cell detection rate", 0.0, 0.20, 0.02, 0.01, format="%.2f",
+        "Min cell detection rate", 0.00, 0.20, 0.02, 0.005, format="%.3f",
         help="Minimum fraction of atlas cells with a non-zero count for the gene.",
     )
     sig_min_max_cluster_mean = st.slider(
@@ -252,15 +251,12 @@ with st.sidebar.expander("Signature refinement", expanded=False):
         help="Minimum value of the gene's largest per-cluster mean log-norm expression.",
     )
     sig_filter_specificity = st.checkbox(
-        "Filter signature for cluster specificity",
+        "Filter for cluster specificity",
         value=True,
         help=(
-            "Drop signature genes expressed broadly across clusters "
-            "(pan-neuronal genes like Snap25 / Syt1 / Stmn2 / Tubb3 / Map2 "
-            "are enriched in any neuronal IP but carry no cell-type "
-            "specificity). A gene is dropped if its per-cluster mean "
-            "log-norm expression exceeds the threshold below in more than "
-            "the fraction of clusters below."
+            "Drops broadly-expressed signature genes (housekeeping / "
+            "pan-neuronal like Snap25, Sst, Polr2h) that carry no cell-type "
+            "specificity and pull non-target clusters into the AUCell top."
         ),
     )
     sig_specificity_thresh = st.slider(
@@ -424,6 +420,8 @@ from data_loading import (
     compute_cluster_mean_expression,
     compute_fraction_expressing,
     compute_cell_detection_rate,
+    get_atlas_cluster_mean_expr,
+    get_atlas_gene_detection_rate,
     compute_single_gene_cluster_stats,
     get_neuronal_cell_mask,
     get_gene_names_from_adata,
@@ -743,11 +741,12 @@ if run_button or st.session_state.analysis_done:
         # adata_cl == adata unless the neuronal-only mask (Change 3) is active,
         # in which case it's the neuronal-cell subset. All cluster-level
         # statistics run against it; per-cell scoring and the per-cell UMAP
-        # keep the full atlas.
-        cluster_mean_expr = compute_cluster_mean_expression(
-            adata_cl, gene_indices, annotation_col, min_cells=min_cells_per_cluster,
-            indices_in_raw=matched_in_raw,
-            normalize=True,
+        # keep the full atlas.  Cached on adata_cl.uns so cutoff tweaks don't
+        # recompute the matched-gene cluster-mean matrix.
+        cluster_mean_expr = get_atlas_cluster_mean_expr(
+            adata_cl, gene_indices, annotation_col,
+            mask_signature="", min_cells=min_cells_per_cluster,
+            indices_in_raw=matched_in_raw, normalize=True,
         )
         progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
 
@@ -765,35 +764,50 @@ if run_button or st.session_state.analysis_done:
         # too broadly expressed to be cell-type-specific, BEFORE π-score
         # ranking / top-N selection, so the filtered list flows into AUCell
         # and every other downstream method.
-        sig_drop_log = pd.DataFrame()
         n_enriched_prefilter = len(enriched_df)
-        if (sig_filter_detectability or sig_filter_specificity) and len(enriched_df) > 0:
+        signature_refinement_active = (
+            (sig_filter_detectability or sig_filter_specificity) and len(enriched_df) > 0
+        )
+        if signature_refinement_active:
             _cand_genes = enriched_df["_hypomap_gene_name"].tolist()
-            _cand_idx = [gene_to_idx[g] for g in _cand_genes if g in gene_to_idx]
-            _cand_detection = compute_cell_detection_rate(
-                adata_cl, _cand_idx, indices_in_raw=matched_in_raw,
-            )
-            _cand_cluster_mean = cluster_mean_expr.loc[
-                [g for g in _cand_genes if g in cluster_mean_expr.index]
-            ]
-            _kept_genes, sig_drop_log = filter_signature_genes_by_atlas(
-                _cand_genes, _cand_cluster_mean, _cand_detection,
+            _cand_detection = get_atlas_gene_detection_rate(adata_cl, mask_signature="")
+            _refined_genes, sig_drop_log = filter_signature_genes_by_atlas(
+                _cand_genes, cluster_mean_expr, _cand_detection,
+                apply_detectability=sig_filter_detectability,
                 min_detection_rate=sig_min_detection_rate,
                 min_max_cluster_mean=sig_min_max_cluster_mean,
+                apply_specificity=sig_filter_specificity,
                 specificity_cluster_mean_thresh=sig_specificity_thresh,
                 specificity_max_cluster_fraction=sig_specificity_max_fraction,
-                apply_detectability=sig_filter_detectability,
-                apply_specificity=sig_filter_specificity,
                 logger=logger,
             )
-            _kept_set = set(_kept_genes)
             enriched_df = enriched_df[
-                enriched_df["_hypomap_gene_name"].isin(_kept_set)
+                enriched_df["_hypomap_gene_name"].isin(set(_refined_genes))
             ].copy()
-            logger.info(
-                "Signature refinement: %d enriched genes -> %d after filters",
-                n_enriched_prefilter, len(enriched_df),
-            )
+            # Acceptance-criterion sanity checks, logged explicitly.
+            _known_contaminants = ["Sst", "Polr2h", "Eid2", "Pdxp", "Ppil1", "Arl6ip4", "Mrpl12", "Emc9"]
+            _dl = sig_drop_log.set_index("gene")
+            _present = [g for g in _known_contaminants if g in _dl.index]
+            _spec_dropped = [g for g in _present if _dl.loc[g, "status"] == "dropped_specificity"]
+            if _present:
+                logger.info(
+                    "Signature refinement contaminant check: %d/%d known broadly-expressed "
+                    "genes present in candidates; dropped by specificity: %s; NOT dropped: %s",
+                    len(_present), len(_known_contaminants), _spec_dropped,
+                    [g for g in _present if g not in _spec_dropped],
+                )
+            if "Pnoc" in set(_cand_genes):
+                if "Pnoc" in set(_refined_genes):
+                    logger.info("Signature refinement tripwire: 'Pnoc' SURVIVED refinement (kept).")
+                # (a WARNING is already emitted inside the filter if Pnoc was dropped)
+        else:
+            sig_drop_log = pd.DataFrame(columns=[
+                "gene", "status", "detection_rate", "max_cluster_mean",
+                "frac_clusters_above_thresh", "reason",
+            ])
+        st.session_state["signature_drop_log"] = (
+            sig_drop_log if signature_refinement_active else None
+        )
 
         enriched_genes_list = enriched_df["_hypomap_gene_name"].tolist()
 
@@ -1138,6 +1152,7 @@ if run_button or st.session_state.analysis_done:
             "enriched_genes_list": enriched_genes_list,
             "sig_drop_log": sig_drop_log,
             "n_enriched_prefilter": n_enriched_prefilter,
+            "signature_refinement_active": signature_refinement_active,
             "top_enriched_genes": top_enriched_genes,
             "corr_df": corr_df,
             "markers": markers,
@@ -1178,6 +1193,10 @@ if run_button or st.session_state.analysis_done:
         enriched_genes_list = _c["enriched_genes_list"]
         sig_drop_log = _c.get("sig_drop_log", pd.DataFrame())
         n_enriched_prefilter = _c.get("n_enriched_prefilter", len(enriched_df))
+        signature_refinement_active = bool(_c.get("signature_refinement_active", False))
+        st.session_state["signature_drop_log"] = (
+            sig_drop_log if signature_refinement_active else None
+        )
         top_enriched_genes = _c["top_enriched_genes"]
         corr_df = _c["corr_df"]
         markers = _c["markers"]
@@ -1406,7 +1425,7 @@ if run_button or st.session_state.analysis_done:
     # collaborator who opens a 40-row composite_ranking.csv can tell from
     # the filename alone that it's a filtered subset, not the full atlas.
     # Segments combine in the order
-    #   {cre_driver_filter}_{neuronal_filter}_{null_filter}
+    #   {cre_driver_filter}_{refined_suffix}_{neuronal_filter}_{null_filter}
     # Dots are replaced with 'p' (safe on every filesystem).
     _empirical_null_active = bool(
         empirical_null_enabled
@@ -1414,20 +1433,30 @@ if run_button or st.session_state.analysis_done:
         and not empirical_null_df.empty
     )
 
-    def _filtered_name(basename: str) -> str:
+    def _filter_signature_parts() -> list:
         segs = []
         if baseline_allowed is not None:
             segs.append(
                 f"{sanity_gene.lower()}_ge{sanity_baseline_mean_expr:.2f}".replace(".", "p")
             )
+        if signature_refinement_active:
+            segs.append("refined")
         if neuronal_clusters is not None:
             segs.append("neuronal")
         if _empirical_null_active:
             segs.append(f"null{int(empirical_null_n)}")
+        return segs
+
+    def _filtered_name(basename: str) -> str:
+        segs = _filter_signature_parts()
         if not segs:
             return basename
         stem, _, ext = basename.rpartition(".")
         return f"{stem}_{'_'.join(segs)}.{ext}"
+
+    # Filter-signature string used in the drop-log filename ("" when no filter
+    # touched the cluster universe / signature).
+    _filter_signature_str = "_".join(_filter_signature_parts())
 
     # ---- Global baseline-filter status banner (above the tab group) ----
     # Rendered once so every tab — not just AUCell — makes the filter state
@@ -1548,51 +1577,76 @@ if run_button or st.session_state.analysis_done:
             st.warning("No genes pass the current enrichment thresholds.")
 
         # ---- Signature refinement diagnostics (Change 2) ----
-        with st.expander("Signature refinement diagnostics", expanded=False):
-            if not (sig_filter_detectability or sig_filter_specificity):
-                st.caption(
-                    "Both signature-refinement filters are disabled — the "
-                    "signature is the unfiltered padj / log₂FC / IP set, "
-                    "ranked by the chosen metric."
-                )
-            elif sig_drop_log is None or len(sig_drop_log) == 0:
-                st.caption("No candidate genes to refine.")
-            else:
+        # Only rendered when at least one refinement filter actually ran.
+        if signature_refinement_active and isinstance(sig_drop_log, pd.DataFrame) and len(sig_drop_log):
+            with st.expander("Signature refinement diagnostics", expanded=False):
                 _n_total = len(sig_drop_log)
                 _n_kept = int((sig_drop_log["status"] == "kept").sum())
+                _n_det = int((sig_drop_log["status"] == "dropped_detectability").sum())
+                _n_spec = int((sig_drop_log["status"] == "dropped_specificity").sum())
+                _n_na = int((sig_drop_log["status"] == "dropped_not_in_atlas").sum())
                 _n_dropped = _n_total - _n_kept
+                _parts = []
+                if _n_det:
+                    _parts.append(f"{_n_det} low detectability")
+                if _n_spec:
+                    _parts.append(f"{_n_spec} low specificity")
+                if _n_na:
+                    _parts.append(f"{_n_na} not in atlas")
+                _breakdown = (": " + ", ".join(_parts)) if _parts else ""
                 st.markdown(
-                    f"**{_n_kept} kept / {_n_dropped} dropped** out of "
-                    f"{_n_total} enriched genes "
-                    f"(detectability filter: {'on' if sig_filter_detectability else 'off'}; "
-                    f"specificity filter: {'on' if sig_filter_specificity else 'off'})."
+                    f"**{_n_total} candidate genes → {_n_kept} kept "
+                    f"({_n_dropped} dropped{_breakdown})** — "
+                    f"detectability filter: **{'on' if sig_filter_detectability else 'off'}**, "
+                    f"specificity filter: **{'on' if sig_filter_specificity else 'off'}**."
                 )
-                _by_reason = (
-                    sig_drop_log.loc[sig_drop_log["status"] != "kept", "status"]
-                    .value_counts()
-                )
-                if len(_by_reason):
-                    st.caption("Drops by reason: " + "; ".join(
-                        f"{r} → {n}" for r, n in _by_reason.items()
-                    ))
+
                 _show = sig_drop_log.copy()
                 _show.columns = [
-                    "Gene", "Status", "Cell detection rate",
-                    "Max cluster mean (log-norm)", "Frac. clusters > threshold",
+                    "Gene", "Status", "Detection rate",
+                    "Max cluster mean (log-norm)", "Frac. clusters > threshold", "Reason",
                 ]
                 st.dataframe(
                     _show.style.format({
-                        "Cell detection rate": "{:.3f}",
-                        "Max cluster mean (log-norm)": "{:.3f}",
-                        "Frac. clusters > threshold": "{:.2%}",
-                    }),
+                        "Detection rate": "{:.4f}",
+                        "Max cluster mean (log-norm)": "{:.4f}",
+                        "Frac. clusters > threshold": "{:.1%}",
+                    }, na_rep="—"),
                     use_container_width=True,
                 )
+
+                _dropped = sig_drop_log[sig_drop_log["status"] != "kept"].copy()
+                if len(_dropped):
+                    st.markdown("**Top 20 dropped genes by detection rate** "
+                                "(highly-detected-but-dropped genes — typically the "
+                                "broadly-expressed contaminants the specificity filter targets):")
+                    _top20 = (
+                        _dropped.sort_values("detection_rate", ascending=False, na_position="last")
+                        .head(20)[["gene", "status", "detection_rate", "max_cluster_mean",
+                                   "frac_clusters_above_thresh", "reason"]]
+                        .reset_index(drop=True)
+                    )
+                    _top20.columns = [
+                        "Gene", "Status", "Detection rate",
+                        "Max cluster mean (log-norm)", "Frac. clusters > threshold", "Reason",
+                    ]
+                    st.dataframe(
+                        _top20.style.format({
+                            "Detection rate": "{:.4f}",
+                            "Max cluster mean (log-norm)": "{:.4f}",
+                            "Frac. clusters > threshold": "{:.1%}",
+                        }, na_rep="—"),
+                        use_container_width=True,
+                    )
+
+                _droplog_name = f"signature_refinement_droplog_{_filter_signature_str}.csv"
                 st.download_button(
-                    "Download signature refinement log (CSV)",
+                    "Download signature refinement drop-log (CSV)",
                     sig_drop_log.to_csv(index=False).encode(),
-                    "signature_refinement_log.csv", "text/csv",
-                    key="dl_sig_refine_csv",
+                    _droplog_name, "text/csv",
+                    key="dl_sig_refine_droplog_csv",
+                    help="One row per candidate gene: gene, status, detection_rate, "
+                         "max_cluster_mean, frac_clusters_above_thresh, reason.",
                 )
 
         st.subheader("Figure: bacTRAP Volcano Plot")
@@ -2718,6 +2772,14 @@ if run_button or st.session_state.analysis_done:
                     "enriched_genes.csv", "text/csv",
                     key="dl_enriched_csv",
                 )
+
+        if signature_refinement_active and isinstance(sig_drop_log, pd.DataFrame) and len(sig_drop_log):
+            st.download_button(
+                "Signature refinement drop-log (CSV)",
+                sig_drop_log.to_csv(index=False).encode(),
+                f"signature_refinement_droplog_{_filter_signature_str}.csv", "text/csv",
+                key="dl_sig_refine_droplog_export",
+            )
 
         if not zscore_df.empty:
             st.download_button(

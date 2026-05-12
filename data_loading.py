@@ -814,6 +814,104 @@ def compute_cell_detection_rate(
     return s
 
 
+def _atlas_stat_key(base: str, mask_signature: str = "") -> str:
+    """Deterministic ``adata.uns`` key for a cached atlas statistic.
+
+    ``mask_signature`` is appended (with a leading underscore) so toggling an
+    atlas restriction (e.g. POA-only) never reuses stale full-atlas data.
+    """
+    ms = (mask_signature or "").strip("_")
+    return f"{base}_{ms}" if ms else base
+
+
+def get_atlas_cluster_mean_expr(
+    adata: ad.AnnData,
+    gene_indices: List[int],
+    annotation_col: str,
+    *,
+    mask_signature: str = "",
+    min_cells: int = 10,
+    indices_in_raw: bool = False,
+    normalize: bool = True,
+    target_sum: float = 1e4,
+) -> pd.DataFrame:
+    """Per-cluster mean (log-norm) expression for ``gene_indices``, cached on
+    ``adata.uns['cluster_mean_expr_<annotation_col>[_<mask_signature>]']``.
+
+    Thin caching wrapper around :func:`compute_cluster_mean_expression` so the
+    matched-gene cluster-mean matrix (used by correlation / NNLS / the
+    signature-refinement and Cre-driver filters) is computed once per atlas
+    load and per (cluster column, atlas-mask) combination, rather than on every
+    parameter tweak.  Cache validity is keyed by the requested gene-set size,
+    ``min_cells`` and ``normalize`` in addition to the column/mask in the key.
+    """
+    key = _atlas_stat_key(f"cluster_mean_expr_{annotation_col}", mask_signature)
+    n_genes = len(gene_indices)
+    gi_hash = hash(tuple(int(i) for i in gene_indices))
+    cached = adata.uns.get(key)
+    if isinstance(cached, dict):
+        df = cached.get("df")
+        if (isinstance(df, pd.DataFrame)
+                and cached.get("n_genes") == n_genes
+                and cached.get("gi_hash") == gi_hash
+                and cached.get("min_cells") == int(min_cells)
+                and cached.get("normalize") == bool(normalize)):
+            logger.info("get_atlas_cluster_mean_expr: cache hit (%s, %d genes)", key, n_genes)
+            return df
+    df = compute_cluster_mean_expression(
+        adata, gene_indices, annotation_col, min_cells=min_cells,
+        indices_in_raw=indices_in_raw, normalize=normalize, target_sum=target_sum,
+    )
+    adata.uns[key] = {
+        "df": df, "n_genes": n_genes, "gi_hash": gi_hash,
+        "min_cells": int(min_cells), "normalize": bool(normalize),
+    }
+    logger.info("get_atlas_cluster_mean_expr: computed & cached (%s, %d genes × %d clusters)",
+                key, df.shape[0], df.shape[1])
+    return df
+
+
+def get_atlas_gene_detection_rate(
+    adata: ad.AnnData,
+    *,
+    mask_signature: str = "",
+    use_raw: bool = True,
+) -> pd.Series:
+    """Atlas-wide per-gene detection rate (fraction of cells with count > 0),
+    cached on ``adata.uns['gene_detection_rate[_<mask_signature>]']``.
+
+    Computed over the raw layer (all genes) from the stored-nonzero counts —
+    O(nnz), no dense materialisation.  Indexed by resolved gene symbol; if a
+    symbol maps to several raw genes the largest detection rate is kept (the
+    detectability filter only cares whether the gene is detectable at all).
+    """
+    key = _atlas_stat_key("gene_detection_rate", mask_signature)
+    cached = adata.uns.get(key)
+    if isinstance(cached, pd.Series) and len(cached):
+        logger.info("get_atlas_gene_detection_rate: cache hit (%s, %d genes)", key, len(cached))
+        return cached
+    use_raw_layer = bool(use_raw and adata.raw is not None)
+    X = adata.raw.X if use_raw_layer else adata.X
+    n_cells = X.shape[0]
+    if sparse.issparse(X):
+        # Stored-nonzero count per column — O(nnz) time, O(n_genes) space, no
+        # dense / boolean-sparse materialisation.  Count matrices loaded from
+        # h5ad effectively never store explicit zeros, so this equals the
+        # number of cells with count > 0.
+        nnz_per_gene = X.getnnz(axis=0)
+    else:
+        nnz_per_gene = (np.asarray(X) > 0).sum(axis=0)
+    rates = np.asarray(nnz_per_gene, dtype=float) / max(n_cells, 1)
+    gene_names = get_gene_names_from_adata(adata, use_raw=use_raw_layer)
+    s = pd.Series(rates, index=[str(g) for g in gene_names])
+    if s.index.duplicated().any():
+        s = s.groupby(level=0).max()
+    adata.uns[key] = s
+    logger.info("get_atlas_gene_detection_rate: computed & cached (%s, %d genes, median=%.4f)",
+                key, len(s), float(s.median()) if len(s) else float("nan"))
+    return s
+
+
 def get_neuronal_cell_mask(adata, c7_column: str = "C7_named") -> pd.Series:
     """Boolean mask of cells belonging to neuronal C7 classes.
 

@@ -235,133 +235,198 @@ def get_enriched_genes(
     return bactrap_df[mask].copy()
 
 
+_SIGNATURE_DROPLOG_COLUMNS = [
+    "gene", "status", "detection_rate", "max_cluster_mean",
+    "frac_clusters_above_thresh", "reason",
+]
+
+
 def filter_signature_genes_by_atlas(
     candidate_genes: List[str],
-    cluster_mean_expr: pd.DataFrame,
-    cell_detection_rate: pd.Series,
+    cluster_mean_expr: pd.DataFrame,        # rows = genes, cols = clusters, log-norm
+    cell_detection_rate: pd.Series,         # index = genes, values = fraction of cells with count > 0
     *,
+    apply_detectability: bool = True,
     min_detection_rate: float = 0.02,
     min_max_cluster_mean: float = 0.05,
+    apply_specificity: bool = True,
     specificity_cluster_mean_thresh: float = 0.5,
     specificity_max_cluster_fraction: float = 0.5,
-    apply_detectability: bool = True,
-    apply_specificity: bool = True,
     logger=None,
 ) -> Tuple[List[str], pd.DataFrame]:
-    """Pre-filter candidate signature genes against HypoMap atlas statistics.
+    """Apply detectability and specificity filters to a candidate signature.
 
-    Two operationally-defined filters, intended to be applied to the bacTRAP
-    candidate signature *after* the DESeq2 padj / log₂FC / min-IP filters and
-    *before* π-score ranking / top-N selection:
+    Two operationally-defined pre-filters, intended for the bacTRAP candidate
+    signature *after* the DESeq2 padj / log₂FC / min-IP filters and *before*
+    π-score ranking / top-N selection:
 
-    1. **HypoMap detectability** — drop genes that are essentially absent from
-       the atlas: cell detection rate < ``min_detection_rate`` OR maximum
-       per-cluster mean log-norm expression < ``min_max_cluster_mean``.  A
-       gene that never enters any cell's top-τ window contributes nothing to
-       AUCell and only adds noise to the signature.
-    2. **Specificity** — drop genes that are highly expressed across most
-       clusters: per-cluster mean log-norm expression exceeds
-       ``specificity_cluster_mean_thresh`` in more than
-       ``specificity_max_cluster_fraction`` of clusters.  Pan-neuronal genes
-       (Snap25, Syt1, Stmn2, Tubb3, Map2, …) are enriched in any neuronal IP
-       but carry no cell-type specificity; "expressed broadly across clusters"
-       is a clean operational proxy that needs no curated list.
+    * **Filter A — HypoMap detectability.** Drop gene ``g`` if either the
+      fraction of atlas cells with detected counts of ``g`` is below
+      ``min_detection_rate``, or the maximum per-cluster mean log-norm
+      expression of ``g`` across all clusters is below ``min_max_cluster_mean``.
+      A gene that's at zero in a cell's top-τ pool can never appear in the
+      AUCell window and contributes only noise.
+    * **Filter B — Cluster specificity.** Drop gene ``g`` if its per-cluster
+      mean log-norm expression exceeds ``specificity_cluster_mean_thresh`` in
+      more than ``specificity_max_cluster_fraction`` of clusters.  Broadly
+      expressed housekeeping / pan-neuronal genes carry no cell-type
+      specificity and pull non-target clusters into the AUCell top.
 
-    Parameters
-    ----------
-    candidate_genes
-        Candidate signature gene symbols, in atlas namespace.
-    cluster_mean_expr
-        Log-normalised mean expression as **genes (index) × clusters
-        (columns)**.  If the candidate genes appear to live on the columns
-        instead, the frame is transposed automatically.  Genes absent from
-        the frame are treated as undetectable (max-cluster-mean = 0).
-    cell_detection_rate
-        Series mapping gene symbol → fraction of atlas cells with raw count
-        > 0.  Genes absent from the series are treated as detection rate 0.
-    apply_detectability, apply_specificity
-        Toggle each filter independently (a disabled filter never drops a
-        gene but its statistics still appear in the drop log).
+    Filters are applied in order (detectability first, then specificity).  A
+    gene that would fail both is reported against whichever filter caught it
+    first; it is not double-counted.  When **both** filters are disabled the
+    candidate list is returned unchanged with every drop-log row marked
+    ``'kept'``.
 
     Returns
     -------
-    (kept_genes, drop_log_df)
-        ``kept_genes`` preserves the input order.  ``drop_log_df`` has one
-        row per candidate gene with columns ``gene``, ``status`` ("kept" or a
-        ``;``-joined drop-reason string), ``cell_detection_rate``,
-        ``max_cluster_mean`` and ``frac_clusters_above_thresh``.
+    kept : list[str]
+        Genes that passed both filters, in input order.
+    drop_log : pd.DataFrame
+        One row per candidate gene, columns
+        ``gene, status, detection_rate, max_cluster_mean,
+        frac_clusters_above_thresh, reason`` — ``status`` is one of
+        ``'kept'``, ``'dropped_detectability'``, ``'dropped_specificity'``,
+        ``'dropped_not_in_atlas'``.  Statistics are NaN where they weren't
+        computed because the gene isn't in the atlas.
     """
     log = logger or logging.getLogger(__name__)
-    cme = cluster_mean_expr
-    if cme is not None and len(cme.index) and len(cme.columns):
-        cand_set = {str(g) for g in candidate_genes}
-        n_on_index = len(cand_set & {str(i) for i in cme.index})
-        n_on_cols = len(cand_set & {str(c) for c in cme.columns})
-        if n_on_cols > n_on_index:
+    cand = [str(g) for g in candidate_genes]
+    n_total = len(cand)
+
+    log.info("Signature refinement: detectability=%s, specificity=%s",
+             "on" if apply_detectability else "off",
+             "on" if apply_specificity else "off")
+    log.info("Candidate genes: %d", n_total)
+
+    # ---- per-gene atlas statistics (vectorised) ----
+    cme = cluster_mean_expr if cluster_mean_expr is not None else pd.DataFrame()
+    # transpose if the candidate genes appear to live on the columns
+    if len(cme.index) and len(cme.columns):
+        cand_set = set(cand)
+        if (len(cand_set & set(map(str, cme.columns)))
+                > len(cand_set & set(map(str, cme.index)))):
             cme = cme.T
+    if len(cme.index) and cme.index.duplicated().any():
+        cme = cme.groupby(level=0).mean()
 
-    if cell_detection_rate is None:
-        cell_detection_rate = pd.Series(dtype=float)
+    det = cell_detection_rate if cell_detection_rate is not None else pd.Series(dtype=float)
+    det = pd.to_numeric(pd.Series(det), errors="coerce")
+    if det.index.duplicated().any():
+        det = det.groupby(level=0).mean()
 
-    rows = []
-    kept: List[str] = []
-    for g in candidate_genes:
-        det = float(cell_detection_rate.get(g, 0.0))
-        if cme is not None and g in cme.index:
-            row_vals = cme.loc[g]
-            if isinstance(row_vals, pd.DataFrame):  # duplicate index guard
-                row_vals = row_vals.mean(axis=0)
-            row_arr = pd.to_numeric(row_vals, errors="coerce").to_numpy(dtype=float)
-            finite = row_arr[np.isfinite(row_arr)]
-            max_cluster_mean = float(finite.max()) if finite.size else 0.0
-            n_clusters = int(finite.size)
-            n_above = int((finite > specificity_cluster_mean_thresh).sum())
-            frac_above = (n_above / n_clusters) if n_clusters else 0.0
-        else:
-            max_cluster_mean = 0.0
-            frac_above = 0.0
-        reasons: List[str] = []
+    cand_idx = pd.Index(cand)
+    in_cme = cand_idx.isin(cme.index)
+    in_det = cand_idx.isin(det.index)
+    in_atlas = in_cme & in_det
+
+    sub = cme.reindex(cand)
+    if len(sub.columns):
+        sub = sub.apply(pd.to_numeric, errors="coerce")
+        max_cluster_mean = sub.max(axis=1, skipna=True).to_numpy(dtype=float)
+        n_present = sub.notna().sum(axis=1).to_numpy()
+        n_above = (sub > specificity_cluster_mean_thresh).sum(axis=1).to_numpy()
+        with np.errstate(invalid="ignore", divide="ignore"):
+            frac_above = np.where(n_present > 0, n_above / np.maximum(n_present, 1), np.nan)
+    else:
+        max_cluster_mean = np.full(n_total, np.nan)
+        frac_above = np.full(n_total, np.nan)
+    detection_rate = det.reindex(cand).to_numpy(dtype=float)
+
+    # NaN-out statistics for genes that aren't fully in the atlas
+    detection_rate = np.where(in_atlas, detection_rate, np.nan)
+    max_cluster_mean = np.where(in_atlas, max_cluster_mean, np.nan)
+    frac_above = np.where(in_atlas, frac_above, np.nan)
+
+    status = np.array(["kept"] * n_total, dtype=object)
+    reason = np.array([""] * n_total, dtype=object)
+
+    both_off = (not apply_detectability) and (not apply_specificity)
+    if not both_off:
+        not_in_atlas = ~in_atlas
+        status[not_in_atlas] = "dropped_not_in_atlas"
+        reason[not_in_atlas] = "not in atlas"
+
         if apply_detectability:
-            if det < min_detection_rate:
-                reasons.append(f"low_detection_rate(<{min_detection_rate:g})")
-            if max_cluster_mean < min_max_cluster_mean:
-                reasons.append(f"low_max_cluster_mean(<{min_max_cluster_mean:g})")
-        if apply_specificity and frac_above > specificity_max_cluster_fraction:
-            reasons.append(
-                f"broadly_expressed(>{specificity_cluster_mean_thresh:g} in "
-                f">{specificity_max_cluster_fraction:.0%} of clusters)"
-            )
-        if reasons:
-            status = "; ".join(reasons)
-        else:
-            status = "kept"
-            kept.append(g)
-        rows.append({
-            "gene": g,
+            open_mask = (status == "kept")
+            dr = np.where(np.isnan(detection_rate), 0.0, detection_rate)
+            mcm = np.where(np.isnan(max_cluster_mean), 0.0, max_cluster_mean)
+            fail_rate = open_mask & (dr < min_detection_rate)
+            fail_mean = open_mask & (mcm < min_max_cluster_mean)
+            fail_det = fail_rate | fail_mean
+            for i in np.flatnonzero(fail_det):
+                rs = []
+                if fail_rate[i]:
+                    rs.append(f"detection_rate={detection_rate[i]:.4g} < {min_detection_rate:g}")
+                if fail_mean[i]:
+                    rs.append(f"max_cluster_mean={max_cluster_mean[i]:.4g} < {min_max_cluster_mean:g}")
+                reason[i] = "; ".join(rs)
+            status[fail_det] = "dropped_detectability"
+
+        if apply_specificity:
+            open_mask = (status == "kept")
+            fa = np.where(np.isnan(frac_above), 0.0, frac_above)
+            fail_spec = open_mask & (fa > specificity_max_cluster_fraction)
+            for i in np.flatnonzero(fail_spec):
+                reason[i] = (
+                    f"frac of clusters with mean > {specificity_cluster_mean_thresh:g} "
+                    f"= {frac_above[i]:.1%} > {specificity_max_cluster_fraction:.0%}"
+                )
+            status[fail_spec] = "dropped_specificity"
+
+    kept = [g for g, s in zip(cand, status) if s == "kept"]
+
+    drop_log = pd.DataFrame(
+        {
+            "gene": cand,
             "status": status,
-            "cell_detection_rate": det,
+            "detection_rate": detection_rate,
             "max_cluster_mean": max_cluster_mean,
             "frac_clusters_above_thresh": frac_above,
-        })
-
-    drop_log_df = pd.DataFrame(rows, columns=[
-        "gene", "status", "cell_detection_rate", "max_cluster_mean",
-        "frac_clusters_above_thresh",
-    ])
-    n_dropped = len(candidate_genes) - len(kept)
-    log.info(
-        "filter_signature_genes_by_atlas: %d candidates -> %d kept, %d dropped "
-        "(detectability=%s, specificity=%s; min_det=%.3g, min_max_mean=%.3g, "
-        "spec_thresh=%.3g, spec_frac=%.3g)",
-        len(candidate_genes), len(kept), n_dropped,
-        apply_detectability, apply_specificity,
-        min_detection_rate, min_max_cluster_mean,
-        specificity_cluster_mean_thresh, specificity_max_cluster_fraction,
+            "reason": reason,
+        },
+        columns=_SIGNATURE_DROPLOG_COLUMNS,
     )
-    if n_dropped:
-        _by_reason = drop_log_df.loc[drop_log_df["status"] != "kept", "status"].value_counts()
-        log.info("  drop reasons: %s", _by_reason.to_dict())
-    return kept, drop_log_df
+
+    # ---- logging ----
+    n_not_atlas = int((status == "dropped_not_in_atlas").sum())
+    n_det = int((status == "dropped_detectability").sum())
+    n_spec = int((status == "dropped_specificity").sum())
+    n_kept = len(kept)
+    # "after detectability" = candidates minus (not-in-atlas + detectability drops)
+    log.info(
+        "After detectability filter: %d kept, %d dropped (min_detection=%g, min_max_cluster_mean=%g)",
+        n_total - n_not_atlas - n_det, n_not_atlas + n_det,
+        min_detection_rate, min_max_cluster_mean,
+    )
+    log.info(
+        "After specificity filter: %d kept, %d dropped (cluster_mean_thresh=%g, max_cluster_frac=%g)",
+        n_kept, n_spec, specificity_cluster_mean_thresh, specificity_max_cluster_fraction,
+    )
+    log.info("Final refined signature: %d genes", n_kept)
+
+    dropped_rows = drop_log[drop_log["status"] != "kept"]
+    if 0 < len(dropped_rows) < 50:
+        for _, r in dropped_rows.iterrows():
+            log.info("  dropped %s (%s): %s", r["gene"], r["status"], r["reason"])
+    elif len(dropped_rows) >= 50:
+        log.info("  %d genes dropped — per-gene reasons at DEBUG level", len(dropped_rows))
+        for _, r in dropped_rows.iterrows():
+            log.debug("  dropped %s (%s): %s", r["gene"], r["status"], r["reason"])
+
+    # Tripwire: Pnoc must survive (sanity check, not a hard error).
+    if ("Pnoc" in set(cand)) and ("Pnoc" not in set(kept)):
+        _pnoc_row = drop_log.loc[drop_log["gene"] == "Pnoc"].iloc[0]
+        log.warning(
+            "Signature refinement DROPPED 'Pnoc' — status=%s, reason='%s', "
+            "detection_rate=%s, max_cluster_mean=%s, frac_clusters_above_thresh=%s. "
+            "This is unexpected for a Pnoc-Cre signature; review the refinement thresholds.",
+            _pnoc_row["status"], _pnoc_row["reason"],
+            _pnoc_row["detection_rate"], _pnoc_row["max_cluster_mean"],
+            _pnoc_row["frac_clusters_above_thresh"],
+        )
+
+    return kept, drop_log
 
 
 def rank_enriched_genes(
