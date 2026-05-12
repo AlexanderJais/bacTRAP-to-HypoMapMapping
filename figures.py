@@ -1280,6 +1280,90 @@ def figure_aucell_violins(
     return fig
 
 
+def figure_aucell_zscore_violins(
+    aucell_scores: np.ndarray,
+    cell_labels: np.ndarray,
+    z_by_cluster: pd.Series,
+    top_n: int = 15,
+    double_column: bool = True,
+    min_cluster_cells: int = 20,
+    allowed_clusters: Optional[Iterable[str]] = None,
+) -> plt.Figure:
+    """Violin plots of AUCell score distributions for the top clusters ranked
+    by the **empirical z-score** (matched-expression null), the supplementary
+    companion to ``figure_aucell_violins`` (which ranks by mean).
+
+    ``z_by_cluster`` maps cluster name → ``z_empirical``.  Clusters absent
+    from it, with NaN z, or with fewer than ``min_cluster_cells`` cells are
+    not eligible for the ranking.
+    """
+    setup_nature_style()
+    width = get_figure_width(double_column)
+
+    df = pd.DataFrame({"score": aucell_scores, "cluster": np.asarray(cell_labels).astype(str)})
+    if allowed_clusters is not None:
+        allowed_set = {str(c) for c in allowed_clusters}
+        df = df[df["cluster"].isin(allowed_set)]
+    cluster_counts = df.groupby("cluster")["score"].count()
+    eligible = set(cluster_counts[cluster_counts >= min_cluster_cells].index)
+
+    z = pd.Series(z_by_cluster).copy()
+    z.index = z.index.astype(str)
+    z = z[z.index.isin(eligible)].dropna().sort_values(ascending=False)
+    top_clusters = z.head(top_n).index.tolist()
+    df_top = df[df["cluster"].isin(top_clusters)].copy()
+
+    if len(df_top) == 0 or len(top_clusters) == 0:
+        fig, ax = plt.subplots(figsize=(width, 2))
+        ax.text(0.5, 0.5, "No empirical-null data available", ha="center",
+                va="center", transform=ax.transAxes)
+        return fig
+
+    df_top["cluster"] = pd.Categorical(df_top["cluster"], categories=top_clusters, ordered=True)
+    height = max(width * 0.5, 3.5)
+    fig, ax = plt.subplots(figsize=(width, height))
+
+    parts = ax.violinplot(
+        [df_top.loc[df_top["cluster"] == c, "score"].values for c in top_clusters],
+        positions=range(len(top_clusters)),
+        vert=False, showmeans=True, showmedians=False, showextrema=False,
+    )
+    cmap = plt.colormaps["viridis"]
+    zvals = z.loc[top_clusters].to_numpy()
+    norm = Normalize(vmin=float(np.nanmin(zvals)), vmax=float(np.nanmax(zvals)) or 1.0)
+    for i, body in enumerate(parts["bodies"]):
+        body.set_facecolor(cmap(norm(zvals[i])))
+        body.set_alpha(0.7)
+        body.set_edgecolor("grey")
+        body.set_linewidth(0.5)
+    if "cmeans" in parts:
+        parts["cmeans"].set_linewidth(0.8)
+        parts["cmeans"].set_color("black")
+
+    # Annotate each violin with its z-score
+    for i, c in enumerate(top_clusters):
+        ax.text(
+            df_top.loc[df_top["cluster"] == c, "score"].max(), i,
+            f"  z={zvals[i]:.1f}", va="center", ha="left", fontsize=5,
+        )
+
+    ax.set_yticks(range(len(top_clusters)))
+    ax.set_yticklabels(top_clusters, fontsize=6)
+    ax.set_xlabel("AUCell score")
+    ax.tick_params(axis="x", labelsize=6)
+    ax.set_title("Top %d by empirical z-score (matched-expression null)" % len(top_clusters))
+    ax.invert_yaxis()
+
+    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, shrink=0.6, aspect=20, pad=0.02)
+    cbar.set_label("empirical z-score", fontsize=6)
+    cbar.ax.tick_params(labelsize=5)
+
+    logger.info("figure_aucell_zscore_violins: %d clusters shown", len(top_clusters))
+    return fig
+
+
 # ---------------------------------------------------------------------------
 # Main Figure 1d: AUCell Score Histogram
 # ---------------------------------------------------------------------------

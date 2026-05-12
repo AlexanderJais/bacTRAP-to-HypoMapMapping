@@ -214,6 +214,94 @@ hide_unassigned = st.sidebar.checkbox(
         "still include all clusters; only the displayed rankings are filtered."
     ),
 )
+restrict_neuronal = st.sidebar.checkbox(
+    "Restrict to neurons only (drop immune/glia/non-neuronal)",
+    value=False,
+    help=(
+        "Recommended for bacTRAP from a neuronal Cre line. Excludes "
+        "microglia, oligodendrocytes, astrocytes, ependymal cells, "
+        "endothelial cells, pars tuberalis pituitary cells, and other "
+        "non-neuronal classes from all cluster-level analyses (correlation, "
+        "Fisher, NNLS, GSEA, AUCell cluster aggregation, sanity check, "
+        "composite, heatmap, dot plot, empirical null). Per-cell UMAP "
+        "(Fig 1a) still shows all cells. Off by default; identified via the "
+        "HypoMap C7_named taxonomy (C25_named fallback)."
+    ),
+)
+
+# ---- Signature refinement (Change 2): drop signature genes that are
+# undetectable in HypoMap or too broadly expressed to be cell-type-specific.
+with st.sidebar.expander("Signature refinement", expanded=False):
+    sig_filter_detectability = st.checkbox(
+        "Filter signature by HypoMap detectability",
+        value=True,
+        help=(
+            "Drop bacTRAP signature genes that are essentially undetectable "
+            "in the atlas — fraction of cells expressing below the floor "
+            "below, OR maximum per-cluster mean log-norm expression below "
+            "the floor below. Such genes never enter any cell's top-τ AUCell "
+            "window and only add noise."
+        ),
+    )
+    sig_min_detection_rate = st.slider(
+        "Min cell detection rate", 0.0, 0.20, 0.02, 0.01, format="%.2f",
+        help="Minimum fraction of atlas cells with a non-zero count for the gene.",
+    )
+    sig_min_max_cluster_mean = st.slider(
+        "Min max-cluster-mean expression", 0.00, 0.50, 0.05, 0.01, format="%.2f",
+        help="Minimum value of the gene's largest per-cluster mean log-norm expression.",
+    )
+    sig_filter_specificity = st.checkbox(
+        "Filter signature for cluster specificity",
+        value=True,
+        help=(
+            "Drop signature genes expressed broadly across clusters "
+            "(pan-neuronal genes like Snap25 / Syt1 / Stmn2 / Tubb3 / Map2 "
+            "are enriched in any neuronal IP but carry no cell-type "
+            "specificity). A gene is dropped if its per-cluster mean "
+            "log-norm expression exceeds the threshold below in more than "
+            "the fraction of clusters below."
+        ),
+    )
+    sig_specificity_thresh = st.slider(
+        "Specificity: cluster mean threshold", 0.1, 2.0, 0.5, 0.1, format="%.1f",
+        help="Per-cluster mean log-norm expression above which a cluster counts as 'expressing' the gene.",
+    )
+    sig_specificity_max_fraction = st.slider(
+        "Specificity: max cluster fraction", 0.1, 1.0, 0.5, 0.05, format="%.2f",
+        help="Drop the gene if more than this fraction of clusters exceed the threshold above.",
+    )
+
+# ---- Empirical-null AUCell (Change 1): score expression-matched random
+# control gene sets and report per-cluster z-score / empirical p-value.
+with st.sidebar.expander("Empirical null", expanded=False):
+    empirical_null_enabled = st.checkbox(
+        "Compute empirical-null z-scores",
+        value=True,
+        help=(
+            "Score N expression-matched random control gene sets with AUCell "
+            "and report, per cluster, a z-score and one-sided empirical "
+            "p-value of the bacTRAP-signature mean relative to the control "
+            "distribution (Aibar et al. 2017). Removes the 'baseline "
+            "gene-rank-width' bias that inflates AUCell in broadly-active "
+            "neuronal clusters. Adds columns to aucell_per_cluster.csv."
+        ),
+    )
+    empirical_null_n = st.slider(
+        "Control sets (N)", 20, 500, 100, 20,
+        help=(
+            "More sets → tighter null estimate but slower. 100 is a "
+            "reasonable compromise; 500 is the AUCell paper default."
+        ),
+    )
+    empirical_null_bins = st.slider(
+        "Expression bins", 3, 10, 5, 1,
+        help="Number of atlas-wide expression-quantile bins used to match control genes to the signature.",
+    )
+    empirical_null_seed = st.number_input(
+        "Random seed", min_value=0, max_value=2**31 - 1, value=0, step=1,
+        help="Seed for the control-set sampling RNG and the AUCell tie-breaking jitter (reproducible).",
+    )
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Cre-driver Sanity Check")
@@ -335,7 +423,9 @@ from data_loading import (
     match_genes,
     compute_cluster_mean_expression,
     compute_fraction_expressing,
+    compute_cell_detection_rate,
     compute_single_gene_cluster_stats,
+    get_neuronal_cell_mask,
     get_gene_names_from_adata,
     _detect_gene_column,
     _build_adata_gene_lookup,
@@ -344,6 +434,7 @@ from data_loading import (
 from analysis import (
     compute_enrichment_correlation,
     get_enriched_genes,
+    filter_signature_genes_by_atlas,
     rank_enriched_genes,
     compute_marker_genes,
     load_precomputed_markers,
@@ -352,6 +443,7 @@ from analysis import (
     compute_nnls_deconvolution,
     compute_gsea_enrichment,
     compute_aucell_scores,
+    compute_empirical_null_aucell,
     validate_aucell_input,
     compute_cluster_enrichment_stats,
     compute_composite_ranking,
@@ -371,6 +463,7 @@ from figures import (
     figure_celltype_umap,
     figure_aucell_cluster_barplot,
     figure_aucell_violins,
+    figure_aucell_zscore_violins,
     figure_aucell_histogram,
     figure_composite_ranking,
     figure_marker_gene_diagnostic,
@@ -531,6 +624,9 @@ _analysis_params = (
     top_n_genes, aucell_top_fraction,
     n_markers_per_cluster, min_cells_per_cluster, marker_method,
     umap_subsample,
+    # Change 2 — signature refinement
+    sig_filter_detectability, sig_min_detection_rate, sig_min_max_cluster_mean,
+    sig_filter_specificity, sig_specificity_thresh, sig_specificity_max_fraction,
 )
 
 if run_button or st.session_state.analysis_done:
@@ -559,6 +655,14 @@ if run_button or st.session_state.analysis_done:
         logger.info("  marker method: %s", marker_method)
         logger.info("  UMAP subsample: %d", umap_subsample)
         logger.info("  hide Unassigned/Mixed: %s", hide_unassigned)
+        logger.info("  restrict to neurons only: %s", restrict_neuronal)
+        logger.info("  signature refinement: detectability=%s (min_det=%.3f, min_max_mean=%.3f), "
+                    "specificity=%s (thresh=%.2f, max_frac=%.2f)",
+                    sig_filter_detectability, sig_min_detection_rate, sig_min_max_cluster_mean,
+                    sig_filter_specificity, sig_specificity_thresh, sig_specificity_max_fraction)
+        logger.info("  empirical null: enabled=%s (N=%d, bins=%d, seed=%d)",
+                    empirical_null_enabled, int(empirical_null_n), int(empirical_null_bins),
+                    int(empirical_null_seed))
         logger.info("  Cre-driver gene: %s", sanity_gene)
         logger.info("  Cre-driver expression fraction threshold: %.2f", sanity_fraction_threshold)
         logger.info("  Cre-driver baseline mean expression (log-norm): %.2f", sanity_baseline_mean_expr)
@@ -616,6 +720,42 @@ if run_button or st.session_state.analysis_done:
             bactrap_matched, padj_cutoff, log2fc_cutoff,
             min_ip_expression=min_ip_expression, ip_col="IP",
         )
+
+        # ---- Signature refinement (Change 2) ----
+        # Drop candidate signature genes that are undetectable in HypoMap or
+        # too broadly expressed to be cell-type-specific, BEFORE π-score
+        # ranking / top-N selection, so the filtered list flows into AUCell
+        # and every other downstream method.
+        sig_drop_log = pd.DataFrame()
+        n_enriched_prefilter = len(enriched_df)
+        if (sig_filter_detectability or sig_filter_specificity) and len(enriched_df) > 0:
+            _cand_genes = enriched_df["_hypomap_gene_name"].tolist()
+            _cand_idx = [gene_to_idx[g] for g in _cand_genes if g in gene_to_idx]
+            _cand_detection = compute_cell_detection_rate(
+                adata, _cand_idx, indices_in_raw=matched_in_raw,
+            )
+            _cand_cluster_mean = cluster_mean_expr.loc[
+                [g for g in _cand_genes if g in cluster_mean_expr.index]
+            ]
+            _kept_genes, sig_drop_log = filter_signature_genes_by_atlas(
+                _cand_genes, _cand_cluster_mean, _cand_detection,
+                min_detection_rate=sig_min_detection_rate,
+                min_max_cluster_mean=sig_min_max_cluster_mean,
+                specificity_cluster_mean_thresh=sig_specificity_thresh,
+                specificity_max_cluster_fraction=sig_specificity_max_fraction,
+                apply_detectability=sig_filter_detectability,
+                apply_specificity=sig_filter_specificity,
+                logger=logger,
+            )
+            _kept_set = set(_kept_genes)
+            enriched_df = enriched_df[
+                enriched_df["_hypomap_gene_name"].isin(_kept_set)
+            ].copy()
+            logger.info(
+                "Signature refinement: %d enriched genes -> %d after filters",
+                n_enriched_prefilter, len(enriched_df),
+            )
+
         enriched_genes_list = enriched_df["_hypomap_gene_name"].tolist()
 
         # Rank enriched genes by the user-chosen metric (default π-score,
@@ -883,6 +1023,8 @@ if run_button or st.session_state.analysis_done:
             "cluster_mean_expr": cluster_mean_expr,
             "enriched_df": enriched_df,
             "enriched_genes_list": enriched_genes_list,
+            "sig_drop_log": sig_drop_log,
+            "n_enriched_prefilter": n_enriched_prefilter,
             "top_enriched_genes": top_enriched_genes,
             "corr_df": corr_df,
             "markers": markers,
@@ -920,6 +1062,8 @@ if run_button or st.session_state.analysis_done:
         cluster_mean_expr = _c["cluster_mean_expr"]
         enriched_df = _c["enriched_df"]
         enriched_genes_list = _c["enriched_genes_list"]
+        sig_drop_log = _c.get("sig_drop_log", pd.DataFrame())
+        n_enriched_prefilter = _c.get("n_enriched_prefilter", len(enriched_df))
         top_enriched_genes = _c["top_enriched_genes"]
         corr_df = _c["corr_df"]
         markers = _c["markers"]
@@ -1243,6 +1387,54 @@ if run_button or st.session_state.analysis_done:
             )
         else:
             st.warning("No genes pass the current enrichment thresholds.")
+
+        # ---- Signature refinement diagnostics (Change 2) ----
+        with st.expander("Signature refinement diagnostics", expanded=False):
+            if not (sig_filter_detectability or sig_filter_specificity):
+                st.caption(
+                    "Both signature-refinement filters are disabled — the "
+                    "signature is the unfiltered padj / log₂FC / IP set, "
+                    "ranked by the chosen metric."
+                )
+            elif sig_drop_log is None or len(sig_drop_log) == 0:
+                st.caption("No candidate genes to refine.")
+            else:
+                _n_total = len(sig_drop_log)
+                _n_kept = int((sig_drop_log["status"] == "kept").sum())
+                _n_dropped = _n_total - _n_kept
+                st.markdown(
+                    f"**{_n_kept} kept / {_n_dropped} dropped** out of "
+                    f"{_n_total} enriched genes "
+                    f"(detectability filter: {'on' if sig_filter_detectability else 'off'}; "
+                    f"specificity filter: {'on' if sig_filter_specificity else 'off'})."
+                )
+                _by_reason = (
+                    sig_drop_log.loc[sig_drop_log["status"] != "kept", "status"]
+                    .value_counts()
+                )
+                if len(_by_reason):
+                    st.caption("Drops by reason: " + "; ".join(
+                        f"{r} → {n}" for r, n in _by_reason.items()
+                    ))
+                _show = sig_drop_log.copy()
+                _show.columns = [
+                    "Gene", "Status", "Cell detection rate",
+                    "Max cluster mean (log-norm)", "Frac. clusters > threshold",
+                ]
+                st.dataframe(
+                    _show.style.format({
+                        "Cell detection rate": "{:.3f}",
+                        "Max cluster mean (log-norm)": "{:.3f}",
+                        "Frac. clusters > threshold": "{:.2%}",
+                    }),
+                    use_container_width=True,
+                )
+                st.download_button(
+                    "Download signature refinement log (CSV)",
+                    sig_drop_log.to_csv(index=False).encode(),
+                    "signature_refinement_log.csv", "text/csv",
+                    key="dl_sig_refine_csv",
+                )
 
         st.subheader("Figure: bacTRAP Volcano Plot")
         fig_volcano = figure_bactrap_volcano(

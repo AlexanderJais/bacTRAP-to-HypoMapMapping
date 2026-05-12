@@ -235,6 +235,135 @@ def get_enriched_genes(
     return bactrap_df[mask].copy()
 
 
+def filter_signature_genes_by_atlas(
+    candidate_genes: List[str],
+    cluster_mean_expr: pd.DataFrame,
+    cell_detection_rate: pd.Series,
+    *,
+    min_detection_rate: float = 0.02,
+    min_max_cluster_mean: float = 0.05,
+    specificity_cluster_mean_thresh: float = 0.5,
+    specificity_max_cluster_fraction: float = 0.5,
+    apply_detectability: bool = True,
+    apply_specificity: bool = True,
+    logger=None,
+) -> Tuple[List[str], pd.DataFrame]:
+    """Pre-filter candidate signature genes against HypoMap atlas statistics.
+
+    Two operationally-defined filters, intended to be applied to the bacTRAP
+    candidate signature *after* the DESeq2 padj / log₂FC / min-IP filters and
+    *before* π-score ranking / top-N selection:
+
+    1. **HypoMap detectability** — drop genes that are essentially absent from
+       the atlas: cell detection rate < ``min_detection_rate`` OR maximum
+       per-cluster mean log-norm expression < ``min_max_cluster_mean``.  A
+       gene that never enters any cell's top-τ window contributes nothing to
+       AUCell and only adds noise to the signature.
+    2. **Specificity** — drop genes that are highly expressed across most
+       clusters: per-cluster mean log-norm expression exceeds
+       ``specificity_cluster_mean_thresh`` in more than
+       ``specificity_max_cluster_fraction`` of clusters.  Pan-neuronal genes
+       (Snap25, Syt1, Stmn2, Tubb3, Map2, …) are enriched in any neuronal IP
+       but carry no cell-type specificity; "expressed broadly across clusters"
+       is a clean operational proxy that needs no curated list.
+
+    Parameters
+    ----------
+    candidate_genes
+        Candidate signature gene symbols, in atlas namespace.
+    cluster_mean_expr
+        Log-normalised mean expression as **genes (index) × clusters
+        (columns)**.  If the candidate genes appear to live on the columns
+        instead, the frame is transposed automatically.  Genes absent from
+        the frame are treated as undetectable (max-cluster-mean = 0).
+    cell_detection_rate
+        Series mapping gene symbol → fraction of atlas cells with raw count
+        > 0.  Genes absent from the series are treated as detection rate 0.
+    apply_detectability, apply_specificity
+        Toggle each filter independently (a disabled filter never drops a
+        gene but its statistics still appear in the drop log).
+
+    Returns
+    -------
+    (kept_genes, drop_log_df)
+        ``kept_genes`` preserves the input order.  ``drop_log_df`` has one
+        row per candidate gene with columns ``gene``, ``status`` ("kept" or a
+        ``;``-joined drop-reason string), ``cell_detection_rate``,
+        ``max_cluster_mean`` and ``frac_clusters_above_thresh``.
+    """
+    log = logger or logging.getLogger(__name__)
+    cme = cluster_mean_expr
+    if cme is not None and len(cme.index) and len(cme.columns):
+        cand_set = {str(g) for g in candidate_genes}
+        n_on_index = len(cand_set & {str(i) for i in cme.index})
+        n_on_cols = len(cand_set & {str(c) for c in cme.columns})
+        if n_on_cols > n_on_index:
+            cme = cme.T
+
+    if cell_detection_rate is None:
+        cell_detection_rate = pd.Series(dtype=float)
+
+    rows = []
+    kept: List[str] = []
+    for g in candidate_genes:
+        det = float(cell_detection_rate.get(g, 0.0))
+        if cme is not None and g in cme.index:
+            row_vals = cme.loc[g]
+            if isinstance(row_vals, pd.DataFrame):  # duplicate index guard
+                row_vals = row_vals.mean(axis=0)
+            row_arr = pd.to_numeric(row_vals, errors="coerce").to_numpy(dtype=float)
+            finite = row_arr[np.isfinite(row_arr)]
+            max_cluster_mean = float(finite.max()) if finite.size else 0.0
+            n_clusters = int(finite.size)
+            n_above = int((finite > specificity_cluster_mean_thresh).sum())
+            frac_above = (n_above / n_clusters) if n_clusters else 0.0
+        else:
+            max_cluster_mean = 0.0
+            frac_above = 0.0
+        reasons: List[str] = []
+        if apply_detectability:
+            if det < min_detection_rate:
+                reasons.append(f"low_detection_rate(<{min_detection_rate:g})")
+            if max_cluster_mean < min_max_cluster_mean:
+                reasons.append(f"low_max_cluster_mean(<{min_max_cluster_mean:g})")
+        if apply_specificity and frac_above > specificity_max_cluster_fraction:
+            reasons.append(
+                f"broadly_expressed(>{specificity_cluster_mean_thresh:g} in "
+                f">{specificity_max_cluster_fraction:.0%} of clusters)"
+            )
+        if reasons:
+            status = "; ".join(reasons)
+        else:
+            status = "kept"
+            kept.append(g)
+        rows.append({
+            "gene": g,
+            "status": status,
+            "cell_detection_rate": det,
+            "max_cluster_mean": max_cluster_mean,
+            "frac_clusters_above_thresh": frac_above,
+        })
+
+    drop_log_df = pd.DataFrame(rows, columns=[
+        "gene", "status", "cell_detection_rate", "max_cluster_mean",
+        "frac_clusters_above_thresh",
+    ])
+    n_dropped = len(candidate_genes) - len(kept)
+    log.info(
+        "filter_signature_genes_by_atlas: %d candidates -> %d kept, %d dropped "
+        "(detectability=%s, specificity=%s; min_det=%.3g, min_max_mean=%.3g, "
+        "spec_thresh=%.3g, spec_frac=%.3g)",
+        len(candidate_genes), len(kept), n_dropped,
+        apply_detectability, apply_specificity,
+        min_detection_rate, min_max_cluster_mean,
+        specificity_cluster_mean_thresh, specificity_max_cluster_fraction,
+    )
+    if n_dropped:
+        _by_reason = drop_log_df.loc[drop_log_df["status"] != "kept", "status"].value_counts()
+        log.info("  drop reasons: %s", _by_reason.to_dict())
+    return kept, drop_log_df
+
+
 def rank_enriched_genes(
     df: pd.DataFrame,
     metric: str = "pi_score",
@@ -1145,6 +1274,271 @@ def compute_aucell_scores(
         })
 
     return scores
+
+
+def _atlas_gene_mean_logexpr(adata, use_raw: bool = True) -> np.ndarray:
+    """Atlas-wide mean expression per gene, log1p-scaled (raw-layer order).
+
+    Used purely to bin genes by expression level for control-set matching, so
+    a (monotone) raw-mean → log1p transform is sufficient — the bin
+    assignments are rank-based and unaffected by the transform.  Cached on
+    ``adata.uns['gene_mean_expr']`` so it is computed once per atlas load;
+    the sparse column sums are cheap (no dense materialisation).
+    """
+    cache_key = "gene_mean_expr"
+    if use_raw and adata.raw is not None:
+        X = adata.raw.X
+    else:
+        X = adata.X
+    n_genes_expected = X.shape[1]
+    cached = adata.uns.get(cache_key)
+    if cached is not None:
+        cached = np.asarray(cached)
+        if cached.shape[0] == n_genes_expected:
+            return cached
+    if sparse.issparse(X):
+        gene_sum = np.asarray(X.sum(axis=0)).ravel().astype(np.float64)
+    else:
+        gene_sum = np.asarray(X, dtype=np.float64).sum(axis=0)
+    gene_mean = np.log1p(gene_sum / max(X.shape[0], 1))
+    adata.uns[cache_key] = gene_mean
+    logger.info("Built bin lookup over %d atlas genes", len(gene_mean))
+    return gene_mean
+
+
+def _expression_bins(gene_mean_expr: np.ndarray, n_bins: int) -> np.ndarray:
+    """Assign each gene to an expression quantile bin (0..n_bins-1).
+
+    Ties (e.g. the large mass of never-expressed genes) collapse bins; the
+    returned array still gives every gene a finite bin index.  Cached-friendly
+    but cheap, so recomputed per call to follow the user's ``n_bins``.
+    """
+    s = pd.Series(np.asarray(gene_mean_expr, dtype=np.float64))
+    try:
+        bins = pd.qcut(s.rank(method="first"), q=int(max(n_bins, 1)),
+                       labels=False, duplicates="drop")
+    except ValueError:
+        bins = pd.Series(np.zeros(len(s), dtype=int))
+    return bins.fillna(0).astype(int).to_numpy()
+
+
+def compute_empirical_null_aucell(
+    adata,
+    signature_genes: List[str],
+    cluster_labels,
+    compute_aucell_fn,
+    *,
+    n_control_sets: int = 100,
+    n_bins: int = 5,
+    seed: int = 0,
+    top_fraction: float = 0.05,
+    min_cluster_size: int = 20,
+    use_raw: bool = True,
+    logger=None,
+    progress_callback=None,
+) -> pd.DataFrame:
+    """Empirical-null AUCell with expression-matched control gene sets.
+
+    For each cluster, compares the bacTRAP-signature AUCell mean against the
+    distribution of AUCell means obtained from ``n_control_sets`` random
+    control gene sets matched to the signature in size and atlas-wide
+    expression structure (Aibar et al., *Nat. Methods* 2017).  This removes
+    the "baseline gene-rank-width" bias that inflates AUCell scores in
+    broadly-active neuronal clusters.
+
+    Parameters
+    ----------
+    adata
+        Atlas the AUCell scoring runs against (neuronal subset when the
+        neuronal-only mask is active).
+    signature_genes
+        The bacTRAP signature gene symbols (atlas namespace).
+    cluster_labels
+        Per-cell cluster labels aligned positionally with ``adata.obs_names``.
+    compute_aucell_fn
+        Callable with the ``compute_aucell_scores`` signature — injected so
+        the function is testable and so the same scorer (and tie-breaking
+        regime) is used for the signature and the controls.
+    n_control_sets, n_bins, seed, top_fraction, min_cluster_size
+        See module / sidebar docs.
+    progress_callback
+        Optional ``fn(i, n)`` called after scoring control set ``i`` of ``n``.
+
+    Returns
+    -------
+    DataFrame indexed by cluster with columns
+        ``null_mean``, ``null_sd``, ``z_empirical``, ``pvalue_empirical``,
+        ``qvalue_empirical``, ``n_control_sets_used``.
+    """
+    log = logger or globals()["logger"]
+    rng = np.random.default_rng(int(seed))
+
+    # ---- Per-cell signature AUCell (scored once, here, so signature and
+    # controls share the exact same scorer / jitter regime) ----
+    sig_scores = np.asarray(
+        compute_aucell_fn(adata, list(signature_genes),
+                          top_fraction=top_fraction, seed=int(seed)),
+        dtype=np.float64,
+    )
+    labels = pd.Series(np.asarray(cluster_labels).astype(str))
+    if len(labels) != len(sig_scores):
+        raise ValueError(
+            f"cluster_labels ({len(labels)}) and AUCell scores ({len(sig_scores)}) "
+            f"length mismatch"
+        )
+    cluster_sizes = labels.value_counts()
+    eligible_clusters = cluster_sizes[cluster_sizes >= min_cluster_size].index.tolist()
+    if not eligible_clusters:
+        log.warning("compute_empirical_null_aucell: no cluster >= %d cells", min_cluster_size)
+        return pd.DataFrame(columns=[
+            "null_mean", "null_sd", "z_empirical", "pvalue_empirical",
+            "qvalue_empirical", "n_control_sets_used",
+        ])
+
+    def _per_cluster_means(scores: np.ndarray) -> pd.Series:
+        return pd.Series(scores).groupby(labels.values).mean().reindex(eligible_clusters)
+
+    sig_means = _per_cluster_means(sig_scores)
+
+    # ---- Expression-matched control gene sets ----
+    lookup, gene_names, is_raw = _build_adata_gene_lookup(adata, use_raw=use_raw)
+    gene_mean_expr = _atlas_gene_mean_logexpr(adata, use_raw=is_raw)
+    gene_bins = _expression_bins(gene_mean_expr, n_bins)
+    adata.uns["gene_expr_bins"] = gene_bins
+
+    sig_idx: List[int] = []
+    matched_genes: List[str] = []
+    for g in signature_genes:
+        key = str(g).strip().lower()
+        if key in lookup:
+            sig_idx.append(lookup[key][1])
+            matched_genes.append(str(g))
+    sig_idx = list(dict.fromkeys(sig_idx))  # de-dup, preserve order
+    sig_idx_set = set(sig_idx)
+
+    # Bin → candidate indices (excluding signature genes themselves)
+    bin_to_candidates: Dict[int, np.ndarray] = {}
+    for b in np.unique(gene_bins):
+        cand = np.where(gene_bins == b)[0]
+        cand = cand[~np.isin(cand, list(sig_idx_set))]
+        bin_to_candidates[int(b)] = cand
+
+    matchable_idx: List[int] = []
+    dropped_idx: List[int] = []
+    for idx in sig_idx:
+        b = int(gene_bins[idx])
+        if bin_to_candidates.get(b) is not None and bin_to_candidates[b].size > 0:
+            matchable_idx.append(idx)
+        else:
+            dropped_idx.append(idx)
+    k_total = len(sig_idx)
+    k_matched = len(matchable_idx)
+    k_dropped = len(dropped_idx)
+    log.info(
+        "Empirical null: enabled (N=%d, bins=%d, seed=%d)",
+        int(n_control_sets), int(n_bins), int(seed),
+    )
+    log.info(
+        "Signature size: %d, in-bin matchable: %d, dropped: %d",
+        k_total, k_matched, k_dropped,
+    )
+    if k_dropped:
+        log.warning(
+            "  %d signature gene(s) have no in-bin control candidates and were "
+            "excluded from control matching (signature scoring still uses all "
+            "matched genes): %s",
+            k_dropped, [gene_names[i] for i in dropped_idx][:20],
+        )
+    if k_matched == 0:
+        log.warning("compute_empirical_null_aucell: no matchable signature genes — skipping")
+        return pd.DataFrame(columns=[
+            "null_mean", "null_sd", "z_empirical", "pvalue_empirical",
+            "qvalue_empirical", "n_control_sets_used",
+        ])
+
+    import time as _time
+    control_cluster_means = np.empty((int(n_control_sets), len(eligible_clusters)), dtype=np.float64)
+    n_used = 0
+    _t0 = _time.time()
+    _per_set_times: List[float] = []
+    for c in range(int(n_control_sets)):
+        _ts = _time.time()
+        ctrl_idx = []
+        for idx in matchable_idx:
+            cand = bin_to_candidates[int(gene_bins[idx])]
+            ctrl_idx.append(int(rng.choice(cand)))
+        ctrl_names = [str(gene_names[i]) for i in ctrl_idx]
+        ctrl_scores = np.asarray(
+            compute_aucell_fn(adata, ctrl_names, top_fraction=top_fraction, seed=int(seed)),
+            dtype=np.float64,
+        )
+        control_cluster_means[c, :] = _per_cluster_means(ctrl_scores).to_numpy()
+        n_used += 1
+        _per_set_times.append(_time.time() - _ts)
+        if progress_callback is not None:
+            try:
+                progress_callback(c + 1, int(n_control_sets))
+            except Exception:
+                pass
+    _t_total = _time.time() - _t0
+    log.info(
+        "Mean control set scoring time: %.1fs; total null time: %.1fs",
+        float(np.mean(_per_set_times)) if _per_set_times else 0.0, _t_total,
+    )
+
+    null_mean = control_cluster_means.mean(axis=0)
+    null_sd = control_cluster_means.std(axis=0, ddof=1) if n_used > 1 else np.zeros(len(eligible_clusters))
+    sig_vec = sig_means.to_numpy(dtype=np.float64)
+    degenerate = ~np.isfinite(null_sd) | (null_sd == 0)
+    z = np.where(degenerate, np.nan, (sig_vec - null_mean) / np.where(degenerate, 1.0, null_sd))
+    # one-sided empirical p (add-1 smoothing): controls >= signature
+    ge_counts = (control_cluster_means >= sig_vec[None, :]).sum(axis=0)
+    pvals = (1.0 + ge_counts) / (n_used + 1.0)
+
+    if degenerate.any():
+        log.warning(
+            "Clusters with degenerate null_sd (set to NaN z): %s",
+            [eligible_clusters[i] for i in np.where(degenerate)[0]],
+        )
+
+    out = pd.DataFrame({
+        "null_mean": null_mean,
+        "null_sd": null_sd,
+        "z_empirical": z,
+        "pvalue_empirical": pvals,
+        "n_control_sets_used": n_used,
+    }, index=pd.Index(eligible_clusters, name="cluster"))
+    valid_p = out["pvalue_empirical"].notna().to_numpy()
+    qvals = np.full(len(out), np.nan)
+    if valid_p.any():
+        _, q, _, _ = multipletests(out.loc[valid_p, "pvalue_empirical"].values, method="fdr_bh")
+        qvals[valid_p] = q
+    out["qvalue_empirical"] = qvals
+    out = out[[
+        "null_mean", "null_sd", "z_empirical", "pvalue_empirical",
+        "qvalue_empirical", "n_control_sets_used",
+    ]]
+
+    # Sanity check: rank correlation between signature mean and z (should be
+    # positive but < ~0.95 — the null must re-order at least some clusters).
+    try:
+        valid = np.isfinite(z) & np.isfinite(sig_vec)
+        if valid.sum() >= 3:
+            rho = stats.spearmanr(sig_vec[valid], z[valid]).statistic
+            log.info("Empirical null sanity: Spearman(mean, z_empirical) = %.3f over %d clusters",
+                     float(rho), int(valid.sum()))
+            ranked_by_mean = sig_means[valid].sort_values(ascending=False).index.tolist()
+            z_series = pd.Series(z, index=eligible_clusters)
+            ranked_by_z = z_series[valid].sort_values(ascending=False).index.tolist()
+            for cl in ranked_by_mean[:10]:
+                drop = ranked_by_z.index(cl) - ranked_by_mean.index(cl)
+                if drop > 0:
+                    log.info("  %s: rank by mean=%d -> by z=%d (drops %d)",
+                             cl, ranked_by_mean.index(cl) + 1, ranked_by_z.index(cl) + 1, drop)
+    except Exception:
+        log.debug("Empirical null sanity check failed", exc_info=True)
+
+    return out
 
 
 def validate_aucell_input(adata, use_raw: bool = True, sample_size: int = 500) -> Dict:

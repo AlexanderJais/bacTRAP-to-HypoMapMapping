@@ -784,6 +784,90 @@ def compute_fraction_expressing(
     return df
 
 
+def compute_cell_detection_rate(
+    adata: ad.AnnData,
+    gene_indices: List[int],
+    use_raw: bool = True,
+    indices_in_raw: bool = False,
+) -> pd.Series:
+    """Atlas-wide fraction of cells with raw count > 0, per gene.
+
+    Returns a Series indexed by resolved gene symbol (duplicates averaged).
+    Used by the signature-refinement detectability filter — a gene below this
+    threshold essentially never appears in any cell's top-τ AUCell window.
+    """
+    gene_indices_arr = np.array(gene_indices)
+    X_genes, survived_mask = _extract_gene_submatrix(
+        adata, gene_indices_arr, use_raw=use_raw, indices_in_raw=indices_in_raw,
+    )
+    if X_genes.size == 0:
+        return pd.Series(dtype=float)
+    frac = (X_genes > 0).mean(axis=0)
+    gene_names = _resolve_gene_names(
+        adata, gene_indices_arr[survived_mask], from_raw=indices_in_raw,
+    )
+    s = pd.Series(np.asarray(frac, dtype=float), index=gene_names)
+    if s.index.duplicated().any():
+        s = s.groupby(s.index).mean()
+    logger.info("compute_cell_detection_rate: %d genes, median rate=%.4f",
+                len(s), float(s.median()) if len(s) else float("nan"))
+    return s
+
+
+def get_neuronal_cell_mask(adata, c7_column: str = "C7_named") -> pd.Series:
+    """Boolean mask of cells belonging to neuronal C7 classes.
+
+    Neuronal vs non-neuronal is decided by case-insensitive substring match
+    of the C7 (or, as a fallback, C25) class label against a list of known
+    non-neuronal class strings (``immune``, ``oligo``, ``astro``,
+    ``ependymal``, ``endothelial``, ``mural``, ``fibroblast``, ``pars``,
+    ``pineal``, ``tanycyte``, ``microglia``, ``erythroid``).  Cells whose
+    label matches any of these substrings are **excluded**; everything else
+    is kept.
+
+    If neither ``C7_named`` nor ``C25_named`` is present, a warning is logged
+    and an all-True mask is returned (no filter applied).
+
+    Returns a ``pd.Series`` indexed by ``adata.obs_names`` with dtype bool.
+    """
+    _NON_NEURONAL = (
+        "immune", "oligo", "astro", "ependymal", "endothelial", "mural",
+        "fibroblast", "pars", "pineal", "tanycyte", "microglia", "erythroid",
+    )
+    col = None
+    for candidate in (c7_column, "C25_named"):
+        if candidate in adata.obs.columns:
+            col = candidate
+            break
+    if col is None:
+        logger.warning(
+            "get_neuronal_cell_mask: neither '%s' nor 'C25_named' present in "
+            "adata.obs (columns: %s) — returning all-True mask (no filter).",
+            c7_column, list(adata.obs.columns),
+        )
+        return pd.Series(True, index=adata.obs_names, dtype=bool)
+
+    labels = adata.obs[col].astype(str)
+    lowered = labels.str.lower()
+    non_neuronal_mask = pd.Series(False, index=adata.obs_names)
+    for token in _NON_NEURONAL:
+        non_neuronal_mask |= lowered.str.contains(token, regex=False, na=False)
+    keep = ~non_neuronal_mask
+    keep.index = adata.obs_names
+
+    n_total = int(len(keep))
+    n_keep = int(keep.sum())
+    # Per-non-neuronal-class breakdown for the log
+    dropped_labels = labels[non_neuronal_mask.values]
+    breakdown = dropped_labels.value_counts().to_dict() if len(dropped_labels) else {}
+    logger.info(
+        "get_neuronal_cell_mask: column='%s', total=%d, kept (neuronal)=%d, "
+        "dropped (non-neuronal)=%d. Dropped per class: %s",
+        col, n_total, n_keep, n_total - n_keep, breakdown,
+    )
+    return keep.astype(bool)
+
+
 def compute_single_gene_cluster_stats(
     adata: ad.AnnData,
     gene_name: str,
