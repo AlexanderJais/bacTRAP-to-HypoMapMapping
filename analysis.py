@@ -1470,16 +1470,17 @@ def compute_aucell_scores_multi(
     return scores
 
 
-def _atlas_gene_mean_logexpr(adata, use_raw: bool = True) -> np.ndarray:
+def _atlas_gene_mean_logexpr(adata, use_raw: bool = True, *, cache_suffix: str = "") -> np.ndarray:
     """Atlas-wide mean expression per gene, log1p-scaled (raw-layer order).
 
     Used purely to bin genes by expression level for control-set matching, so
     a (monotone) raw-mean → log1p transform is sufficient — the bin
     assignments are rank-based and unaffected by the transform.  Cached on
-    ``adata.uns['gene_mean_expr']`` so it is computed once per atlas load;
+    ``adata.uns['gene_mean_expr[_<cache_suffix>]']`` so it is computed once per
+    atlas load (the ``cache_suffix`` distinguishes e.g. a POA-restricted view);
     the sparse column sums are cheap (no dense materialisation).
     """
-    cache_key = "gene_mean_expr"
+    cache_key = f"gene_mean_expr_{cache_suffix}" if cache_suffix else "gene_mean_expr"
     if use_raw and adata.raw is not None:
         X = adata.raw.X
     else:
@@ -1528,6 +1529,7 @@ def compute_empirical_null_aucell(
     top_fraction: float = 0.05,
     min_cluster_size: int = 20,
     use_raw: bool = True,
+    mask_signature: str = "",
     logger=None,
     progress_callback=None,
 ) -> pd.DataFrame:
@@ -1543,8 +1545,8 @@ def compute_empirical_null_aucell(
     Parameters
     ----------
     adata
-        Atlas the AUCell scoring runs against (neuronal subset when the
-        neuronal-only mask is active).
+        Atlas the AUCell scoring runs against — a restricted view (e.g. the
+        POA-cell subset) when an atlas restriction is active.
     signature_genes
         The bacTRAP signature gene symbols (atlas namespace).
     cluster_labels
@@ -1555,8 +1557,11 @@ def compute_empirical_null_aucell(
         regime) is used for the signature and the controls.
     n_control_sets, n_bins, seed, top_fraction, min_cluster_size
         See module / sidebar docs.
+    mask_signature
+        Appended to the ``adata.uns`` cache keys for the gene-mean / quantile-
+        bin lookups so a restricted view never reuses full-atlas statistics.
     progress_callback
-        Optional ``fn(i, n)`` called after scoring control set ``i`` of ``n``.
+        Optional ``fn(i, n)`` called during the batched control scoring pass.
 
     Returns
     -------
@@ -1595,10 +1600,15 @@ def compute_empirical_null_aucell(
     sig_means = _per_cluster_means(sig_scores)
 
     # ---- Expression-matched control gene sets ----
+    # When an atlas restriction (e.g. POA-only) is active, `adata` here is the
+    # restricted view, so gene means / quantile bins are recomputed on the
+    # restricted cells; `mask_signature` is appended to the cache keys so the
+    # restricted statistics never collide with the full-atlas ones.
     lookup, gene_names, is_raw = _build_adata_gene_lookup(adata, use_raw=use_raw)
-    gene_mean_expr = _atlas_gene_mean_logexpr(adata, use_raw=is_raw)
+    gene_mean_expr = _atlas_gene_mean_logexpr(adata, use_raw=is_raw, cache_suffix=mask_signature)
     gene_bins = _expression_bins(gene_mean_expr, n_bins)
-    adata.uns["gene_expr_bins"] = gene_bins
+    _bins_key = f"gene_expr_bins_{mask_signature}" if mask_signature else "gene_expr_bins"
+    adata.uns[_bins_key] = gene_bins
 
     sig_idx: List[int] = []
     matched_genes: List[str] = []

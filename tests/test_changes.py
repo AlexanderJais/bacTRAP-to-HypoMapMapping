@@ -15,51 +15,9 @@ from analysis import (
     compute_aucell_scores_multi,
     compute_empirical_null_aucell,
 )
-from data_loading import get_neuronal_cell_mask
 
-# (Signature-refinement filter tests live in tests/test_signature_refinement.py)
-
-
-# ---------------------------------------------------------------------------
-# Change 3 — neuronal-only atlas mask
-# ---------------------------------------------------------------------------
-
-class _FakeAdata:
-    """Minimal stand-in exposing only what get_neuronal_cell_mask reads."""
-
-    def __init__(self, obs):
-        self.obs = obs
-        self.obs_names = obs.index
-
-
-def test_get_neuronal_cell_mask_basic():
-    obs = pd.DataFrame(
-        {"C7_named": [
-            "GABA-1", "GLU-2", "Oligodendrocytes", "Astrocytes",
-            "Immune", "Endothelial", "GABA-3", "Tanycytes", "ParsTuber",
-        ]},
-        index=[f"cell{i}" for i in range(9)],
-    )
-    mask = get_neuronal_cell_mask(_FakeAdata(obs))
-    assert mask.dtype == bool
-    assert list(mask) == [True, True, False, False, False, False, True, False, False]
-    assert mask.sum() == 3
-
-
-def test_get_neuronal_cell_mask_fallback_to_c25():
-    obs = pd.DataFrame(
-        {"C25_named": ["GABA-1", "Microglia", "GLU-1"]},
-        index=["a", "b", "c"],
-    )
-    mask = get_neuronal_cell_mask(_FakeAdata(obs))
-    assert list(mask) == [True, False, True]
-
-
-def test_get_neuronal_cell_mask_missing_columns_returns_all_true():
-    obs = pd.DataFrame({"something_else": ["x", "y", "z"]}, index=["a", "b", "c"])
-    mask = get_neuronal_cell_mask(_FakeAdata(obs))
-    assert mask.all()
-    assert len(mask) == 3
+# Signature-refinement filter tests: tests/test_signature_refinement.py
+# POA-restriction tests:             tests/test_poa_restriction.py
 
 
 # ---------------------------------------------------------------------------

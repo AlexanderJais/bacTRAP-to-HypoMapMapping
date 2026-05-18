@@ -214,20 +214,46 @@ hide_unassigned = st.sidebar.checkbox(
         "still include all clusters; only the displayed rankings are filtered."
     ),
 )
-restrict_neuronal = st.sidebar.checkbox(
-    "Restrict to neurons only (drop immune/glia/non-neuronal)",
-    value=False,
-    help=(
-        "Recommended for bacTRAP from a neuronal Cre line. Excludes "
-        "microglia, oligodendrocytes, astrocytes, ependymal cells, "
-        "endothelial cells, pars tuberalis pituitary cells, and other "
-        "non-neuronal classes from all cluster-level analyses (correlation, "
-        "Fisher, NNLS, GSEA, AUCell cluster aggregation, sanity check, "
-        "composite, heatmap, dot plot, empirical null). Per-cell UMAP "
-        "(Fig 1a) still shows all cells. Off by default; identified via the "
-        "HypoMap C7_named taxonomy (C25_named fallback)."
-    ),
-)
+# ---- Atlas restriction (Change 3): optionally restrict the whole pipeline
+# to POA cells (S1-aligned). Off by default — reproduces full-atlas behaviour.
+with st.sidebar.expander("Atlas restriction", expanded=False):
+    poa_only = st.checkbox(
+        "Restrict to POA cells only",
+        value=False,
+        help=(
+            "Run the entire pipeline (cluster means, marker genes, AUCell, "
+            "empirical null, Cre-driver baseline filter, and the four "
+            "orthogonal methods) over preoptic-area cells only — directly "
+            "comparable to HypoMap Table S1, which reports per-cluster Pnoc "
+            "means computed within POA cells. Off by default; when off, the "
+            "full hypothalamic atlas is used."
+        ),
+    )
+    if poa_only:
+        poa_keywords_input = st.text_input(
+            "POA keywords (comma-separated)", value="preoptic",
+            help=(
+                "Case-insensitive substring match against the "
+                "`Region_summarized` column. Add 'paraventricular', "
+                "'anteroventral', etc. to broaden the definition."
+            ),
+        )
+        poa_include_na = st.checkbox(
+            "Include cells with no regional assignment (NA)", value=True,
+            help=(
+                "Required to retain C185-67 Pnoc.Mixed.GABA-2 and other "
+                "clusters whose regional assignment is missing in HypoMap. "
+                "Off-by-default would exclude the highest-Pnoc S1 cluster."
+            ),
+        )
+        poa_min_cells = st.number_input(
+            "Min POA cells per cluster", min_value=1, max_value=2000, value=20, step=1,
+            help="Clusters with fewer than this many POA cells drop out of the analysis entirely.",
+        )
+    else:
+        poa_keywords_input, poa_include_na, poa_min_cells = "preoptic", True, 20
+poa_keywords = tuple(s.strip().lower() for s in str(poa_keywords_input).split(",") if s.strip()) or ("preoptic",)
+poa_min_cells = int(poa_min_cells)
 
 # ---- Signature refinement (Change 2): drop signature genes that are
 # undetectable in HypoMap or too broadly expressed to be cell-type-specific.
@@ -324,24 +350,38 @@ sanity_fraction_threshold = st.sidebar.slider(
         "default that tolerates dropout."
     ),
 )
+_baseline_help = (
+    "**Ranking filter.** When > 0, drop clusters whose mean "
+    "(log-normalized) Cre-driver expression falls below this floor "
+    "from every cluster-level ranking: correlation / Fisher / NNLS / "
+    "GSEA / composite consensus (survivors are re-ranked against one "
+    "another), AUCell cluster figures (1b, S2, 1c), and the heatmap "
+    "(S5, with z-scores recomputed against the filtered reference). "
+    "Filtered CSV downloads are suffixed with the filter signature "
+    "(e.g. `composite_ranking_pnoc_ge0p05.csv`). Set to 0 to disable. "
+)
+if poa_only:
+    _baseline_help += (
+        "**POA-only mode is on**, so this cutoff compares against the "
+        "Cre-driver gene's mean log-norm expression *in POA cells only* — "
+        "those values are typically larger than the full-atlas values for "
+        "genes enriched in POA cells, so the same numeric cutoff is "
+        "stricter here. Default 0.15 still excludes the warm-sensitive Pnoc "
+        "minority (POA-restricted Pnoc < 0.08), consistent with full-atlas "
+        "behaviour; 0.03 is the recommended Pnoc-Cre value when the warm-"
+        "sensitive subset should be retained."
+    )
+else:
+    _baseline_help += (
+        "(Full-atlas mode — the cutoff compares against full-atlas mean "
+        "log-norm expression.) Caveat: snRNA-seq dropout for neuropeptides "
+        "means 'not detected' ≠ 'not expressed'. Start at ~0.05 and inspect "
+        "the sanity-check table to tune."
+    )
 sanity_baseline_mean_expr = st.sidebar.slider(
     "Baseline Cre-driver mean expression (log-norm)",
     0.0, 1.5, 0.0, 0.01, format="%.2f",
-    help=(
-        "**Ranking filter.** When > 0, drop clusters whose mean "
-        "(log-normalized) Cre-driver expression falls below this floor "
-        "from every cluster-level ranking: correlation / Fisher / NNLS / "
-        "GSEA / composite consensus (survivors are re-ranked against one "
-        "another), AUCell cluster figures (1b, S2, 1c), and the heatmap "
-        "(S5, with z-scores recomputed against the filtered reference). "
-        "Per-cell panels (AUCell UMAP fig 1a, per-cell CSVs) are "
-        "unaffected — they carry no cluster identity. Filtered CSV "
-        "downloads are suffixed with the filter signature "
-        "(e.g. `composite_ranking_pnoc_ge0p05.csv`). Set to 0 to disable. "
-        "Caveat: snRNA-seq dropout for neuropeptides means 'not detected' "
-        "≠ 'not expressed' — a strict floor can discard genuine positives. "
-        "Start at ~0.05 and inspect the sanity-check table to tune."
-    ),
+    help=_baseline_help,
 )
 
 st.sidebar.markdown("---")
@@ -423,7 +463,8 @@ from data_loading import (
     get_atlas_cluster_mean_expr,
     get_atlas_gene_detection_rate,
     compute_single_gene_cluster_stats,
-    get_neuronal_cell_mask,
+    get_poa_cell_mask,
+    build_mask_signature,
     get_gene_names_from_adata,
     _detect_gene_column,
     _build_adata_gene_lookup,
@@ -528,35 +569,55 @@ annotation_col = st.sidebar.selectbox(
     ),
 )
 
-# ---- Neuronal-only atlas mask (Change 3) ----
-# Computed once per (atlas file, toggle). When active, every cluster-level
-# analysis runs against a neuronal-cell subset (adata_cl); per-cell scoring
-# and the per-cell UMAP keep the full atlas.
-neuronal_mask = None
-if restrict_neuronal:
-    _nm_arr = get_neuronal_cell_mask(adata).to_numpy(dtype=bool)
-    if not _nm_arr.all():
-        neuronal_mask = _nm_arr
-    else:
-        st.sidebar.caption(
-            ":warning: 'neurons only' is on but no non-neuronal cells were "
-            "identified (C7_named/C25_named missing or all-neuronal) — no filter applied."
+# ---- POA-only atlas restriction (Change 3) ----
+# When active, every cluster-level AND per-cell computation runs against a
+# POA-cell subset (adata_view), built once per (atlas file, mask signature)
+# and cached in session state. When off, adata_view IS adata (full atlas).
+poa_mask = None
+mask_signature = ""
+if poa_only:
+    try:
+        poa_mask = get_poa_cell_mask(
+            adata, poa_keywords=poa_keywords, include_na=poa_include_na, logger=logger,
+        ).to_numpy(dtype=bool)
+    except KeyError as e:
+        st.error(
+            f"**POA restriction can't be applied:** {e}\n\n"
+            f"Uncheck 'Restrict to POA cells only', or tell us which `.obs` "
+            f"column holds the regional labels."
         )
-if neuronal_mask is not None:
-    _adata_cl_key = (hypomap_file.strip(), int(neuronal_mask.sum()))
-    if st.session_state.get("_adata_cl_key") != _adata_cl_key:
-        with st.spinner("Building neuronal-only atlas view..."):
-            st.session_state["_adata_cl"] = adata[neuronal_mask].copy()
-        st.session_state["_adata_cl_key"] = _adata_cl_key
-    adata_cl = st.session_state["_adata_cl"]
-    neuronal_clusters = set(adata_cl.obs[annotation_col].astype(str).unique())
+        st.stop()
+    if not poa_mask.any():
+        st.error(
+            "**POA restriction selected zero cells.** Check the keyword list "
+            "(default `preoptic`) against the values in `Region_summarized`, "
+            "or uncheck 'Restrict to POA cells only'."
+        )
+        st.stop()
+    if poa_mask.all():
+        poa_mask = None  # nothing excluded — treat as no-op
+        st.sidebar.caption(":warning: POA keywords matched every cell — no restriction applied.")
+    else:
+        mask_signature = build_mask_signature(poa_keywords, poa_include_na)
+
+if poa_mask is not None:
+    _view_key = (hypomap_file.strip(), mask_signature, int(poa_mask.sum()))
+    if st.session_state.get("_adata_view_key") != _view_key:
+        with st.spinner(f"Building POA-restricted atlas view ({int(poa_mask.sum()):,} cells)..."):
+            st.session_state["_adata_view"] = adata[poa_mask].copy()
+        st.session_state["_adata_view_key"] = _view_key
+    adata_view = st.session_state["_adata_view"]
+    _n_poa = int(poa_mask.sum())
     st.sidebar.caption(
-        f"Neurons-only: **{int(neuronal_mask.sum()):,}** / {adata.n_obs:,} cells, "
-        f"{len(neuronal_clusters)} clusters at `{annotation_col}`."
+        f"POA-only: **{_n_poa:,}** / {adata.n_obs:,} cells "
+        f"({100.0 * _n_poa / max(adata.n_obs, 1):.1f}%), signature `{mask_signature}`."
     )
 else:
-    adata_cl = adata
-    neuronal_clusters = None
+    adata_view = adata
+poa_active = poa_mask is not None
+# Effective per-cluster cell-count floors (POA cells when the restriction is on)
+_eff_min_cells_markers = max(min_cells_per_cluster, poa_min_cells) if poa_active else min_cells_per_cluster
+_eff_min_cells_rank = max(min_cells_for_rank, poa_min_cells) if poa_active else min_cells_for_rank
 
 # Gene column selection for bacTRAP data
 # Build HypoMap lookup once for auto-detection
@@ -652,8 +713,8 @@ _analysis_params = (
     top_n_genes, aucell_top_fraction,
     n_markers_per_cluster, min_cells_per_cluster, marker_method,
     umap_subsample,
-    # Change 3 — neuronal-only atlas mask
-    bool(neuronal_mask is not None),
+    # Change 3 — POA-only atlas restriction
+    bool(poa_active), mask_signature, int(poa_min_cells),
     # Change 2 — signature refinement
     sig_filter_detectability, sig_min_detection_rate, sig_min_max_cluster_mean,
     sig_filter_specificity, sig_specificity_thresh, sig_specificity_max_fraction,
@@ -688,7 +749,13 @@ if run_button or st.session_state.analysis_done:
         logger.info("  marker method: %s", marker_method)
         logger.info("  UMAP subsample: %d", umap_subsample)
         logger.info("  hide Unassigned/Mixed: %s", hide_unassigned)
-        logger.info("  restrict to neurons only: %s", restrict_neuronal)
+        if poa_active:
+            logger.info("  POA restriction: ON — keywords=%s, include_na=%s, mask_signature='%s', "
+                        "min_poa_cells=%d, N_poa=%d/%d cells",
+                        list(poa_keywords), poa_include_na, mask_signature, poa_min_cells,
+                        int(poa_mask.sum()), adata.n_obs)
+        else:
+            logger.info("  POA restriction: OFF (full hypothalamic atlas)")
         logger.info("  signature refinement: detectability=%s (min_det=%.3f, min_max_mean=%.3f), "
                     "specificity=%s (thresh=%.2f, max_frac=%.2f)",
                     sig_filter_detectability, sig_min_detection_rate, sig_min_max_cluster_mean,
@@ -738,14 +805,14 @@ if run_button or st.session_state.analysis_done:
         # heuristic samples only the selected genes and can falsely decide
         # the data is already normalized — see the second call below).
         gene_indices = [gene_to_idx[g] for g in matched_genes]
-        # adata_cl == adata unless the neuronal-only mask (Change 3) is active,
-        # in which case it's the neuronal-cell subset. All cluster-level
-        # statistics run against it; per-cell scoring and the per-cell UMAP
-        # keep the full atlas.  Cached on adata_cl.uns so cutoff tweaks don't
-        # recompute the matched-gene cluster-mean matrix.
+        # adata_view == adata unless the POA-only restriction (Change 3) is
+        # active, in which case it's the POA-cell subset and the WHOLE pipeline
+        # (per-cell scoring, UMAP, every cluster statistic) runs against it.
+        # Cached on adata_view.uns (keyed by cluster column + mask signature) so
+        # cutoff tweaks don't recompute the matched-gene cluster-mean matrix.
         cluster_mean_expr = get_atlas_cluster_mean_expr(
-            adata_cl, gene_indices, annotation_col,
-            mask_signature="", min_cells=min_cells_per_cluster,
+            adata_view, gene_indices, annotation_col,
+            mask_signature=mask_signature, min_cells=_eff_min_cells_markers,
             indices_in_raw=matched_in_raw, normalize=True,
         )
         progress.progress(25, text="Cluster means computed. Identifying enriched genes...")
@@ -770,7 +837,7 @@ if run_button or st.session_state.analysis_done:
         )
         if signature_refinement_active:
             _cand_genes = enriched_df["_hypomap_gene_name"].tolist()
-            _cand_detection = get_atlas_gene_detection_rate(adata_cl, mask_signature="")
+            _cand_detection = get_atlas_gene_detection_rate(adata_view, mask_signature=mask_signature)
             _refined_genes, sig_drop_log = filter_signature_genes_by_atlas(
                 _cand_genes, cluster_mean_expr, _cand_detection,
                 apply_detectability=sig_filter_detectability,
@@ -834,30 +901,47 @@ if run_button or st.session_state.analysis_done:
         # are reused when the cluster labels match the selected annotation.
         _markers_params = (
             hypomap_file.strip(), annotation_col,
-            n_markers_per_cluster, min_cells_per_cluster, marker_method,
-            bool(neuronal_clusters is not None),
+            n_markers_per_cluster, _eff_min_cells_markers, marker_method,
+            mask_signature,
         )
         _markers_cached = st.session_state.get("_markers_cache")
         if _markers_cached is not None and _markers_cached.get("params") == _markers_params:
             markers = _markers_cached["markers"]
             logger.info("reusing cached markers (params unchanged)")
         else:
-            markers = load_precomputed_markers(adata_cl)
-            if markers is not None:
-                current_clusters = set(adata_cl.obs[annotation_col].unique().astype(str))
-                marker_clusters = set(markers.keys())
-                overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
-                if overlap_ratio < 0.5:
-                    markers = None  # mismatch — recompute for the selected annotation
+            # In POA-only mode the precomputed markers shipped in .uns were
+            # computed on the FULL atlas and reflect full-atlas specificity, so
+            # they would give wrong Fisher / GSEA results — recompute on the
+            # POA view instead.
+            if poa_active:
+                markers = None
+            else:
+                markers = load_precomputed_markers(adata_view)
+                if markers is not None:
+                    current_clusters = set(adata_view.obs[annotation_col].unique().astype(str))
+                    marker_clusters = set(markers.keys())
+                    overlap_ratio = len(current_clusters & marker_clusters) / max(len(current_clusters), 1)
+                    if overlap_ratio < 0.5:
+                        markers = None  # mismatch — recompute for the selected annotation
             if markers is None:
-                with st.spinner("Computing marker genes (this may take several minutes)..."):
+                _spin_msg = (
+                    "Computing marker genes on the POA view (1–3 min with Wilcoxon)..."
+                    if poa_active else
+                    "Computing marker genes (this may take several minutes)..."
+                )
+                with st.spinner(_spin_msg):
                     try:
+                        import time as _mt
+                        _mt0 = _mt.time()
                         markers = compute_marker_genes(
-                            adata_cl, annotation_col,
+                            adata_view, annotation_col,
                             n_genes=n_markers_per_cluster,
-                            min_cells=min_cells_per_cluster,
+                            min_cells=_eff_min_cells_markers,
                             method=marker_method,
                         )
+                        logger.info("Marker genes: recomputed on %s view (method=%s, took %.1fs, %d clusters)",
+                                    "POA" if poa_active else "full-atlas", marker_method,
+                                    _mt.time() - _mt0, len(markers))
                     except Exception as e:
                         # Common on pathologically small atlases or when
                         # min_cells_per_cluster is too aggressive for the
@@ -868,18 +952,10 @@ if run_button or st.session_state.analysis_done:
                             f"Marker gene computation failed: {e}. "
                             f"Fisher overlap, GSEA, dotplot and heatmap panels "
                             f"will be unavailable. Try lowering "
-                            f"'Min cells per cluster (markers)' or selecting "
-                            f"a coarser annotation level."
+                            f"'Min cells per cluster (markers)' / 'Min POA cells "
+                            f"per cluster', or selecting a coarser annotation level."
                         )
                         markers = {}
-            # When the neuronal-only mask is active, drop markers for any
-            # non-neuronal cluster (precomputed markers loaded from .uns are
-            # full-atlas) so Fisher / GSEA only test neuronal clusters.
-            if neuronal_clusters is not None and markers:
-                _n_before = len(markers)
-                markers = {c: m for c, m in markers.items() if str(c) in neuronal_clusters}
-                logger.info("neuronal mask: markers restricted %d -> %d clusters",
-                            _n_before, len(markers))
             st.session_state["_markers_cache"] = {
                 "params": _markers_params, "markers": markers,
             }
@@ -912,8 +988,8 @@ if run_button or st.session_state.analysis_done:
             top_clusters_corr = corr_df["cluster"].tolist()[:15] if len(corr_df) > 0 else []
 
         frac_expr = compute_fraction_expressing(
-            adata_cl, enriched_gene_indices, annotation_col,
-            min_cells=min_cells_per_cluster,
+            adata_view, enriched_gene_indices, annotation_col,
+            min_cells=_eff_min_cells_markers,
             indices_in_raw=matched_in_raw,
         )
         # Explicit normalize=True — top_enriched_genes are typically sparse,
@@ -921,8 +997,8 @@ if run_button or st.session_state.analysis_done:
         # heuristic sees a low sample max and skips normalisation, leaving
         # the dotplot in raw-count space while correlation/NNLS use log-norm.
         enriched_mean_expr = compute_cluster_mean_expression(
-            adata_cl, enriched_gene_indices, annotation_col,
-            min_cells=min_cells_per_cluster,
+            adata_view, enriched_gene_indices, annotation_col,
+            min_cells=_eff_min_cells_markers,
             indices_in_raw=matched_in_raw,
             normalize=True,
         )
@@ -968,7 +1044,7 @@ if run_button or st.session_state.analysis_done:
 
         # ---- AUCell input-layer validation (fix #2: guard against
         # non-raw-count layers silently being fed into AUCell) ----
-        aucell_qc = validate_aucell_input(adata, use_raw=True)
+        aucell_qc = validate_aucell_input(adata_view, use_raw=True)
 
         progress.progress(80, text="Computing AUCell scores...")
 
@@ -976,9 +1052,11 @@ if run_button or st.session_state.analysis_done:
         # Use the empirical-null seed so the signature scoring shares the
         # tie-breaking regime with the control sets (Change 1); with the
         # default seed=0 this is identical to the previous behaviour.
+        # adata_view is the POA subset when the restriction is on, the full
+        # atlas otherwise — so per-cell scoring and Fig 1a follow the mode.
         aucell_run_info: dict = {}
         aucell_scores = compute_aucell_scores(
-            adata, top_enriched_genes, top_fraction=aucell_top_fraction,
+            adata_view, top_enriched_genes, top_fraction=aucell_top_fraction,
             seed=int(empirical_null_seed),
             info_out=aucell_run_info,
         )
@@ -1007,7 +1085,7 @@ if run_button or st.session_state.analysis_done:
         aucell_qc.setdefault("info", []).append(
             f"AUCell window: n_top = {aucell_run_info.get('n_top', '?')} genes "
             f"({aucell_run_info.get('effective_top_fraction', 0) * 100:.2f}% of "
-            f"{adata.raw.n_vars if adata.raw is not None else adata.n_vars}); "
+            f"{adata_view.raw.n_vars if adata_view.raw is not None else adata_view.n_vars}); "
             f"signature matched {aucell_run_info.get('n_query_matched', '?')} / "
             f"{aucell_run_info.get('n_query_requested', '?')} genes."
         )
@@ -1015,21 +1093,17 @@ if run_button or st.session_state.analysis_done:
         progress.progress(83, text="Computing per-cluster enrichment significance...")
 
         # ---- AUCell result tables (raw data underlying figures 1a–1c + S2/S3) ----
-        # Per-cell scores / per-cell CSV / Fig 1a stay on the full atlas; the
-        # cluster-level aggregation (Change 3) runs over neuronal cells only
-        # when the neurons-only mask is active.
-        _cell_labels_arr = adata.obs[annotation_col].values.astype(str)
+        # adata_view is the whole atlas (or the POA subset, Change 3), so the
+        # per-cell scores, the per-cell CSV, Fig 1a and the cluster aggregation
+        # are all over the same cell set.
+        _cell_labels_arr = adata_view.obs[annotation_col].values.astype(str)
         aucell_per_cell_df = pd.DataFrame({
-            "cell_id": adata.obs_names.astype(str),
+            "cell_id": adata_view.obs_names.astype(str),
             "cluster": _cell_labels_arr,
             "aucell_score": aucell_scores,
         })
-        if neuronal_mask is not None:
-            _agg_scores = aucell_scores[neuronal_mask]
-            _agg_labels = _cell_labels_arr[neuronal_mask]
-        else:
-            _agg_scores = aucell_scores
-            _agg_labels = _cell_labels_arr
+        _agg_scores = aucell_scores
+        _agg_labels = _cell_labels_arr
 
         # Per-cluster significance (fix #3: Welch's one-sided t-test
         # cluster-vs-rest with BH-FDR so users can separate "truly enriched"
@@ -1083,14 +1157,15 @@ if run_button or st.session_state.analysis_done:
 
             try:
                 empirical_null_df = compute_empirical_null_aucell(
-                    adata_cl, top_enriched_genes,
-                    adata_cl.obs[annotation_col].values.astype(str),
+                    adata_view, top_enriched_genes,
+                    adata_view.obs[annotation_col].values.astype(str),
                     compute_aucell_scores,
                     n_control_sets=int(empirical_null_n),
                     n_bins=int(empirical_null_bins),
                     seed=int(empirical_null_seed),
                     top_fraction=aucell_top_fraction,
-                    min_cluster_size=min_cells_for_rank,
+                    min_cluster_size=_eff_min_cells_rank,
+                    mask_signature=mask_signature,
                     logger=logger,
                     progress_callback=_null_progress,
                 )
@@ -1127,14 +1202,14 @@ if run_button or st.session_state.analysis_done:
 
         # ---- Subsample for UMAP ----
         sub_indices = None
-        if adata.n_obs > umap_subsample:
+        if adata_view.n_obs > umap_subsample:
             rng = np.random.default_rng(42)
-            sub_indices = np.sort(rng.choice(adata.n_obs, size=umap_subsample, replace=False))
+            sub_indices = np.sort(rng.choice(adata_view.n_obs, size=umap_subsample, replace=False))
 
         # Get UMAP coordinates (existence already verified at load time)
-        umap_key = "X_umap" if "X_umap" in adata.obsm else "X_UMAP"
-        umap_coords = adata.obsm[umap_key]
-        cell_labels = adata.obs[annotation_col].values.astype(str)
+        umap_key = "X_umap" if "X_umap" in adata_view.obsm else "X_UMAP"
+        umap_coords = adata_view.obsm[umap_key]
+        cell_labels = adata_view.obs[annotation_col].values.astype(str)
 
         progress.progress(100, text="Analysis complete!")
         progress_placeholder.empty()
@@ -1233,11 +1308,11 @@ if run_button or st.session_state.analysis_done:
     # drops an AUCell-eligible cluster just because it fell below sanity's
     # own size gate (user raising min_cells_per_cluster above
     # min_cells_for_rank would otherwise silently tighten AUCell too).
-    _sanity_min_cells = min(min_cells_per_cluster, min_cells_for_rank)
+    _sanity_min_cells = min(_eff_min_cells_markers, _eff_min_cells_rank)
     sanity_cache_key = (
         hypomap_file.strip(), annotation_col,
         _sanity_min_cells, sanity_gene.strip().lower(),
-        bool(neuronal_clusters is not None),
+        mask_signature,
     )
     _sanity_cached = st.session_state.get("_sanity_cache")
     if _sanity_cached is not None and _sanity_cached.get("key") == sanity_cache_key:
@@ -1245,7 +1320,7 @@ if run_button or st.session_state.analysis_done:
     else:
         with st.spinner(f"Computing per-cluster {sanity_gene} expression..."):
             sanity_stats = compute_single_gene_cluster_stats(
-                adata_cl, sanity_gene.strip(), annotation_col,
+                adata_view, sanity_gene.strip(), annotation_col,
                 adata_gene_lookup=_adata_lookup,
                 has_raw=_adata_has_raw,
                 min_cells=_sanity_min_cells,
@@ -1279,17 +1354,12 @@ if run_button or st.session_state.analysis_done:
                 baseline_filter_state = "active"
 
     # Clusters eligible for the AUCell top-N figure rankings: the baseline
-    # filter survivors (when active) intersected with the neuronal clusters
-    # (when the neurons-only mask is active). When both are off, None == no
-    # restriction.
-    if baseline_allowed is not None and neuronal_clusters is not None:
-        _aucell_allowed = {str(c) for c in baseline_allowed} & {str(c) for c in neuronal_clusters}
-    elif baseline_allowed is not None:
-        _aucell_allowed = {str(c) for c in baseline_allowed}
-    elif neuronal_clusters is not None:
-        _aucell_allowed = {str(c) for c in neuronal_clusters}
-    else:
-        _aucell_allowed = None
+    # Cre-driver filter survivors when active, otherwise no restriction.  (The
+    # POA restriction, when active, already limits the cluster universe at the
+    # data level — adata_view holds POA cells only — so no extra set needed.)
+    _aucell_allowed = (
+        {str(c) for c in baseline_allowed} if baseline_allowed is not None else None
+    )
 
     # ---- Optional display-time filter for Unassigned / Mixed clusters ----
     # HypoMap's "Unassigned" and "Mixed" clusters are uncurated aggregates
@@ -1398,11 +1468,11 @@ if run_button or st.session_state.analysis_done:
 
     # Pre-encode AUCell result tables.  Both the per-cell (~400k rows) and
     # per-cluster (~185 rows) CSVs change when the baseline filter or the
-    # neurons-only mask change the cluster universe, so re-serialise whenever
-    # the filter signature changes.
+    # POA restriction change the cell / cluster universe, so re-serialise
+    # whenever the filter signature changes.
     _baseline_sig = (
         tuple(sorted(baseline_allowed)) if baseline_allowed is not None else (),
-        bool(neuronal_clusters is not None),
+        mask_signature,
     )
     if st.session_state.table_bytes.get("_aucell_per_cell_sig") != _baseline_sig:
         st.session_state.table_bytes["aucell_per_cell"] = (
@@ -1425,12 +1495,17 @@ if run_button or st.session_state.analysis_done:
     # collaborator who opens a 40-row composite_ranking.csv can tell from
     # the filename alone that it's a filtered subset, not the full atlas.
     # Segments combine in the order
-    #   {cre_driver_filter}_{refined_suffix}_{neuronal_filter}_{null_filter}
+    #   {cre_driver_filter}_{poaonly_suffix}_{refined_suffix}_{null_filter}
     # Dots are replaced with 'p' (safe on every filesystem).
     _empirical_null_active = bool(
         empirical_null_enabled
         and isinstance(empirical_null_df, pd.DataFrame)
         and not empirical_null_df.empty
+    )
+    # The POA-only segment is the full mask signature unless the user added
+    # more than two custom keywords, in which case it collapses to "poaonly".
+    _poa_segment = (
+        (mask_signature if len(poa_keywords) <= 2 else "poaonly") if poa_active else None
     )
 
     def _filter_signature_parts() -> list:
@@ -1439,10 +1514,10 @@ if run_button or st.session_state.analysis_done:
             segs.append(
                 f"{sanity_gene.lower()}_ge{sanity_baseline_mean_expr:.2f}".replace(".", "p")
             )
+        if _poa_segment:
+            segs.append(_poa_segment)
         if signature_refinement_active:
             segs.append("refined")
-        if neuronal_clusters is not None:
-            segs.append("neuronal")
         if _empirical_null_active:
             segs.append(f"null{int(empirical_null_n)}")
         return segs
@@ -1489,16 +1564,21 @@ if run_button or st.session_state.analysis_done:
             f"Lower the slider."
         )
 
-    if neuronal_clusters is not None:
+    if poa_active:
+        _n_poa = int(poa_mask.sum())
+        _n_view_clusters = adata_view.obs[annotation_col].nunique()
         st.info(
-            f"**Neurons-only mode active** — every cluster-level analysis "
-            f"(correlation, Fisher, NNLS, GSEA, AUCell cluster aggregation, "
-            f"Cre-driver sanity, composite, heatmap, dot plot, empirical null) "
-            f"runs over **{int(neuronal_mask.sum()):,}** neuronal cells / "
-            f"{adata.n_obs:,} total ({len(neuronal_clusters)} neuronal "
-            f"clusters at `{annotation_col}`). The per-cell AUCell UMAP "
-            f"(Fig 1a) and per-cell CSV still cover all cells. Filtered CSV "
-            f"downloads carry a `_neuronal` suffix."
+            f"**POA-only mode active** — the entire pipeline (cluster means, "
+            f"marker genes, AUCell, empirical null, Cre-driver baseline filter, "
+            f"correlation, Fisher, NNLS, GSEA, and the per-cell AUCell UMAP) "
+            f"runs over **{_n_poa:,}** preoptic-area cells / {adata.n_obs:,} "
+            f"total ({100.0 * _n_poa / max(adata.n_obs, 1):.1f}%; "
+            f"{_n_view_clusters} clusters at `{annotation_col}`), keywords "
+            f"`{', '.join(poa_keywords)}`, NA cells "
+            f"{'included' if poa_include_na else 'excluded'}. "
+            f"Cre-driver baseline cutoffs now operate on POA-restricted values "
+            f"(see the slider tooltip). Filtered CSV downloads carry a "
+            f"`_{mask_signature}` suffix."
         )
 
     # ======================================================================
@@ -1511,10 +1591,16 @@ if run_button or st.session_state.analysis_done:
         with col1:
             st.metric("bacTRAP genes", len(bactrap_df))
         with col2:
-            st.metric("HypoMap cells", f"{adata.n_obs:,}")
+            if poa_active:
+                st.metric("HypoMap cells (POA / total)",
+                          f"{adata_view.n_obs:,} / {adata.n_obs:,}",
+                          help="POA restriction active — the pipeline runs over the POA subset.")
+            else:
+                st.metric("HypoMap cells", f"{adata.n_obs:,}")
         with col3:
-            n_clusters = adata.obs[annotation_col].nunique()
-            st.metric(f"Clusters ({annotation_col})", n_clusters)
+            n_clusters = adata_view.obs[annotation_col].nunique()
+            st.metric(f"Clusters ({annotation_col})", n_clusters,
+                      help=("POA-restricted cluster count" if poa_active else None))
 
         st.markdown("---")
 
@@ -1648,6 +1734,55 @@ if run_button or st.session_state.analysis_done:
                     help="One row per candidate gene: gene, status, detection_rate, "
                          "max_cluster_mean, frac_clusters_above_thresh, reason.",
                 )
+
+        # ---- POA restriction diagnostics (Change 3) ----
+        if poa_active:
+            with st.expander("POA restriction diagnostics", expanded=False):
+                _n_poa = int(poa_mask.sum())
+                _n_full = int(adata.n_obs)
+                st.markdown(
+                    f"**POA restriction active:** {_n_poa:,} of {_n_full:,} cells "
+                    f"retained ({100.0 * _n_poa / max(_n_full, 1):.1f}%) — keywords "
+                    f"`{', '.join(poa_keywords)}`, NA cells "
+                    f"{'**included**' if poa_include_na else '**excluded**'}, "
+                    f"`min_poa_cells = {poa_min_cells}`."
+                )
+                try:
+                    _region = adata.obs["Region_summarized"].astype(str)
+                    _ret = _region[poa_mask].value_counts().head(5)
+                    _exc = _region[~poa_mask].value_counts().head(5)
+                    rc1, rc2 = st.columns(2)
+                    with rc1:
+                        st.markdown("**Top retained regions**")
+                        st.dataframe(_ret.rename("cells").to_frame(), use_container_width=True)
+                    with rc2:
+                        st.markdown("**Top excluded regions**")
+                        st.dataframe(_exc.rename("cells").to_frame(), use_container_width=True)
+                except Exception:
+                    st.caption("(Region breakdown unavailable.)")
+                # Clusters that drop out (too few POA cells)
+                _full_sizes = adata.obs[annotation_col].astype(str).value_counts()
+                _poa_sizes = adata_view.obs[annotation_col].astype(str).value_counts()
+                _gate = max(int(poa_min_cells), int(min_cells_for_rank))
+                _drop_rows = []
+                for _c, _nf in _full_sizes.items():
+                    _np_ = int(_poa_sizes.get(_c, 0))
+                    if _np_ < _gate:
+                        _drop_rows.append({
+                            "cluster": _c, "n_poa_cells": _np_, "n_full_atlas_cells": int(_nf),
+                        })
+                if _drop_rows:
+                    _drop_df = pd.DataFrame(_drop_rows).sort_values(
+                        "n_full_atlas_cells", ascending=False,
+                    ).reset_index(drop=True)
+                    st.markdown(
+                        f"**{len(_drop_df)} clusters drop out** under the POA mask "
+                        f"(fewer than {_gate} POA cells) — full-atlas cell counts shown "
+                        f"for reference:"
+                    )
+                    st.dataframe(_drop_df, use_container_width=True)
+                else:
+                    st.caption("No clusters fall below the POA cell-count gate.")
 
         st.subheader("Figure: bacTRAP Volcano Plot")
         fig_volcano = figure_bactrap_volcano(
