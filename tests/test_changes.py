@@ -11,72 +11,13 @@ import pandas as pd
 import pytest
 
 from analysis import (
-    filter_signature_genes_by_atlas,
     compute_aucell_scores,
     compute_aucell_scores_multi,
     compute_empirical_null_aucell,
 )
 from data_loading import get_neuronal_cell_mask
 
-
-# ---------------------------------------------------------------------------
-# Change 2 — signature refinement filters
-# ---------------------------------------------------------------------------
-
-def test_filter_signature_genes_by_atlas_planted_scenarios():
-    clusters = ["c1", "c2", "c3", "c4"]
-    # Three planted genes:
-    #  - Specific:    high in one cluster, near-zero elsewhere, decent detection
-    #  - Broad:       high in every cluster (pan-neuronal-like)
-    #  - Undetectable: ~0 everywhere, near-zero detection rate
-    cluster_mean_expr = pd.DataFrame(
-        {
-            "c1": [2.0, 1.0, 0.0],
-            "c2": [0.01, 1.1, 0.0],
-            "c3": [0.0, 0.9, 0.005],
-            "c4": [0.0, 1.3, 0.0],
-        },
-        index=["Specific", "Broad", "Undetectable"],
-    )
-    cell_detection_rate = pd.Series(
-        {"Specific": 0.35, "Broad": 0.7, "Undetectable": 0.001}
-    )
-    kept, drop_log = filter_signature_genes_by_atlas(
-        ["Specific", "Broad", "Undetectable"],
-        cluster_mean_expr, cell_detection_rate,
-    )
-    assert kept == ["Specific"]
-    status = dict(zip(drop_log["gene"], drop_log["status"]))
-    assert status["Specific"] == "kept"
-    assert "broadly_expressed" in status["Broad"]
-    assert ("low_detection_rate" in status["Undetectable"]
-            or "low_max_cluster_mean" in status["Undetectable"])
-
-
-def test_filter_signature_genes_by_atlas_disabled_is_noop():
-    cluster_mean_expr = pd.DataFrame(
-        {"c1": [5.0], "c2": [5.0]}, index=["G"],
-    )
-    cell_detection_rate = pd.Series({"G": 0.0})
-    kept, drop_log = filter_signature_genes_by_atlas(
-        ["G"], cluster_mean_expr, cell_detection_rate,
-        apply_detectability=False, apply_specificity=False,
-    )
-    assert kept == ["G"]
-    assert (drop_log["status"] == "kept").all()
-
-
-def test_filter_signature_genes_by_atlas_transpose_autodetect():
-    # cluster x gene orientation should be auto-transposed
-    cluster_by_gene = pd.DataFrame(
-        {"Specific": [2.0, 0.0, 0.0], "Broad": [1.0, 1.1, 0.9]},
-        index=["c1", "c2", "c3"],
-    )
-    det = pd.Series({"Specific": 0.3, "Broad": 0.7})
-    kept, _ = filter_signature_genes_by_atlas(
-        ["Specific", "Broad"], cluster_by_gene, det,
-    )
-    assert kept == ["Specific"]
+# (Signature-refinement filter tests live in tests/test_signature_refinement.py)
 
 
 # ---------------------------------------------------------------------------
